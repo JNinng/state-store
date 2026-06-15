@@ -1,0 +1,78 @@
+<h2>核心接口与它们的关系</h2>
+<p class="subtitle">三个核心接口 + Engine 生命周期钩子</p>
+
+<div class="section">
+  <h3>1. StateRepository — 存储抽象（statestore 包）</h3>
+  <pre style="background:var(--bg-secondary);border-radius:8px;padding:16px;font-size:13px;overflow-x:auto"><code>type StateRepository interface {
+    Load(ctx context.Context, taskID string) ([]byte, error)
+    // 任务不存在 → nil, nil（不是 error）
+
+    Save(ctx context.Context, taskID string, state []byte) error
+    // 原子全量替换，不是局部合并
+    // 返回 nil → 状态已完整持久化
+    // 返回 error → 状态停留在 Save 调用之前
+
+    Delete(ctx context.Context, taskID string) error
+    // 清理已完成/过期/放弃的任务
+}</code></pre>
+</div>
+
+<div class="section">
+  <h3>2. DataSource / DataTarget — 物理系统抽象（phys 包）</h3>
+  <pre style="background:var(--bg-secondary);border-radius:8px;padding:16px;font-size:13px;overflow-x:auto"><code>// 导出场景：从数据源分页读取
+type DataSource interface {
+    FetchPage(ctx context.Context, page int, pageSize int) ([]Row, error)
+    // 返回 io.EOF 表示无更多数据
+}
+
+// 导入场景：向目标批量写入
+type DataTarget interface {
+    WriteBatch(ctx context.Context, rows []Row) (inserted int64, err error)
+}
+
+// Row 是通用数据载体
+type Row map[string]interface{}</code></pre>
+</div>
+
+<div class="section">
+  <h3>3. Engine 接口 — 引擎生命周期（engine 包）</h3>
+  <div style="background:var(--accent-bg);border-radius:8px;padding:16px;margin-bottom:16px">
+    <strong>核心理念：</strong>框架编排 Checkpoint 协议和恢复链路，引擎只实现 3 个业务钩子。
+  </div>
+  <pre style="background:var(--bg-secondary);border-radius:8px;padding:16px;font-size:13px;overflow-x:auto"><code>type Engine interface {
+    // Execute 执行一步业务逻辑，返回新的 LSN。
+    // 框架保证：Execute 被调用时，物理系统已对齐到 state.CheckpointLSN。
+    // 参数 state 是当前状态（恢复时包含断点信息）。
+    // 返回 newLSN 为本次执行后的安全偏移量。
+    Execute(ctx context.Context, state statestore.BaseTaskState) (newLSN int64, err error)
+
+    // Compensate 补偿物理系统，使其对齐到 targetLSN。
+    // 框架在恢复时调用：加载 state → 检测物理系统超前 → 调用 Compensate。
+    // 对于导出：截断文件到 targetLSN 字节。
+    // 对于导入：定位源文件读取位置到 targetLSN。
+    Compensate(ctx context.Context, targetLSN int64) error
+
+    // Progress 根据 state 计算 0-100 的进度百分比。
+    // 由框架在每次 checkpoint 后调用，更新 state.Progress。
+    Progress(state statestore.BaseTaskState) int
+}</code></pre>
+</div>
+
+<div class="section">
+  <h3>接口关系图</h3>
+  <div style="background:var(--bg-secondary);border-radius:12px;padding:24px;font-family:monospace;font-size:13px;line-height:2">
+    <div style="text-align:center;color:var(--text-muted)">调用方</div>
+    <div style="text-align:center;margin:2px 0">│ 实现 DataSource/DataTarget</div>
+    <div style="text-align:center;margin:2px 0">│ 创建 filestore.FileRepository</div>
+    <div style="text-align:center;margin:2px 0">│ 创建 engine.New(engine.Options{...})</div>
+    <div style="text-align:center;margin:2px 0">│ 调用 engine.Run(ctx, taskID)</div>
+    <div style="text-align:center;margin:8px 0">▼</div>
+    <div style="background:var(--accent-bg);border-radius:8px;padding:8px;text-align:center">
+      <strong>engine.Run()</strong> — Checkpoint 协议编排
+      <div style="font-size:12px;color:var(--text-muted)">1. repo.Load(taskID) 获取初始/断点状态</div>
+      <div style="font-size:12px;color:var(--text-muted)">2. 若 Phase 非 Running → engine.Compensate(lsn) 对齐物理系统</div>
+      <div style="font-size:12px;color:var(--text-muted)">3. 循环: engine.Execute(state) → repo.Save(state) → 更新 state</div>
+      <div style="font-size:12px;color:var(--text-muted)">4. 完成/失败 → 更新 Phase → repo.Save(state)</div>
+    </div>
+  </div>
+</div>

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"state-store/engine"
 	"state-store/phys"
@@ -136,7 +137,7 @@ func (e *ExportEngine) executeMerging(ctx context.Context, state *statestore.Bas
 	if p.MergedChunkIdx >= p.TotalChunks {
 		state.Phase = statestore.PhaseCompleted
 		state.Message = "export completed"
-		e.cleanupChunks(p.TotalChunks)
+		// cleanup deferred to caller via Cleanup()
 		return p.FinalFileSize, nil
 	}
 
@@ -233,5 +234,16 @@ func (e *ExportEngine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
 func (e *ExportEngine) cleanupChunks(total int) {
 	for i := 0; i < total; i++ {
 		os.Remove(e.chunkPath(i))
+	}
+}
+
+// Cleanup 清理导出过程中产生的分块文件。应在 Run() 成功返回后调用。
+func (e *ExportEngine) Cleanup() {
+	entries, _ := os.ReadDir(e.outputDir)
+	prefix := e.outputFile + ".chunk_"
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".tmp") {
+			os.Remove(filepath.Join(e.outputDir, entry.Name()))
+		}
 	}
 }

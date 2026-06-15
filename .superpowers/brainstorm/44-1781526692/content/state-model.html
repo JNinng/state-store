@@ -1,0 +1,142 @@
+<h2>状态模型与 Phase 状态机</h2>
+<p class="subtitle">BaseTaskState 结构 + TaskPhase 转换规则</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">BaseTaskState（statestore 包）</div>
+    <div class="mockup-body">
+      <pre style="font-size:12px;line-height:1.6;margin:0"><code>type BaseTaskState struct {
+    TaskID   string    `json:"task_id"`
+    TaskType string    `json:"task_type"`
+
+    Phase    TaskPhase `json:"phase"`
+    Message  string    `json:"message,omitempty"`
+
+    Progress int       `json:"progress"`
+
+    // 核心锚点
+    CheckpointLSN int64 `json:"checkpoint_lsn"`
+
+    // 业务扩展载荷
+    Payload json.RawMessage `json:"payload"`
+}
+
+type TaskPhase string
+const (
+    PhasePending   TaskPhase = "pending"
+    PhaseRunning   TaskPhase = "running"
+    PhaseMerging   TaskPhase = "merging"
+    PhaseVerifying TaskPhase = "verifying"
+    PhaseCompleted TaskPhase = "completed"
+    PhaseFailed    TaskPhase = "failed"
+    PhaseCanceled  TaskPhase = "canceled"
+)</code></pre>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">Phase 状态机流转</div>
+    <div class="mockup-body">
+      <div style="font-family:monospace;font-size:13px;line-height:2.2">
+        <div style="text-align:center;padding:4px;background:var(--bg-secondary);border-radius:4px;margin:2px">
+          <strong>pending</strong> → 等待启动
+        </div>
+        <div style="text-align:center;margin:2px">│ Run()</div>
+        <div style="text-align:center;padding:4px;background:var(--accent-bg);border-radius:4px;margin:2px">
+          <strong>running</strong> → 执行中
+        </div>
+        <div style="display:flex;gap:4px;margin:4px 0">
+          <div style="flex:1;text-align:center;font-size:11px">引擎决定合并</div>
+          <div style="flex:1;text-align:center;font-size:11px">Execute error</div>
+          <div style="flex:1;text-align:center;font-size:11px">Execute done</div>
+          <div style="flex:1;text-align:center;font-size:11px">外部取消</div>
+        </div>
+        <div style="display:flex;gap:4px">
+          <div style="flex:1;text-align:center;padding:4px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px;margin:2px">
+            merging
+          </div>
+          <div style="flex:1;text-align:center;padding:4px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;margin:2px">
+            failed
+          </div>
+          <div style="flex:1;text-align:center;padding:4px;background:#f0fdf4;border:1px solid #86efac;border-radius:4px;margin:2px">
+            completed
+          </div>
+          <div style="flex:1;text-align:center;padding:4px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px;margin:2px">
+            canceled
+          </div>
+        </div>
+        <div style="text-align:center;margin:8px 0 2px">
+          <span style="padding:2px 8px;background:#f0fdf4;border:1px solid #86efac;border-radius:4px"><strong>completed</strong></span>
+          &nbsp;←&nbsp;
+          <span style="padding:2px 8px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px">merging</span>
+        </div>
+        <div style="text-align:center;margin:2px">
+          <span style="padding:2px 8px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px">verifying</span>
+          &nbsp;→&nbsp;
+          <span style="padding:2px 8px;background:#f0fdf4;border:1px solid #86efac;border-radius:4px">completed</span>
+          &nbsp;或&nbsp;
+          <span style="padding:2px 8px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px">failed</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>引擎的 Payload 类型（各自包内定义）</h3>
+  <div style="display:flex;gap:16px">
+    <div style="flex:1;background:var(--bg-secondary);border-radius:8px;padding:12px">
+      <h4>ExportPayload</h4>
+      <pre style="font-size:12px;margin:0"><code>type ExportPayload struct {
+    CurrentPage      int   `json:"current_page"`
+    CurrentChunkIdx  int   `json:"current_chunk_idx"`
+    CurrentChunkSize int64 `json:"current_chunk_size"`
+    TotalChunks      int   `json:"total_chunks"`
+    FinalFileSize    int64 `json:"final_file_size"`
+    MergedChunkIdx   int   `json:"merged_chunk_idx"`
+}</code></pre>
+    </div>
+    <div style="flex:1;background:var(--bg-secondary);border-radius:8px;padding:12px">
+      <h4>ImportPayload</h4>
+      <pre style="font-size:12px;margin:0"><code>type ImportPayload struct {
+    CurrentReadOffset int64 `json:"current_read_offset"`
+    CurrentBatchIdx   int   `json:"current_batch_idx"`
+    TotalBatches      int   `json:"total_batches"`
+    InsertedRows      int64 `json:"inserted_rows"`
+    FailedRows        int64 `json:"failed_rows"`
+}</code></pre>
+    </div>
+  </div>
+  <p style="font-size:13px;color:var(--text-muted);margin-top:12px">Payload 类型由各引擎包定义。引擎的 Execute 方法内部从 <code>state.Payload</code> 反序列化，修改后序列化回写。</p>
+</div>
+
+<div class="section">
+  <h3>Phase 转换规则</h3>
+  <table style="width:100%;border-collapse:collapse">
+    <tr style="border-bottom:1px solid var(--border)">
+      <th style="text-align:left;padding:8px">从</th>
+      <th style="text-align:left;padding:8px">到</th>
+      <th style="text-align:left;padding:8px">触发条件</th>
+      <th style="text-align:left;padding:8px">由谁设置</th>
+    </tr>
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px">pending</td><td style="padding:8px">running</td>
+      <td style="padding:8px">Run() 被调用</td><td style="padding:8px">框架</td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px">running</td><td style="padding:8px">merging</td>
+      <td style="padding:8px">引擎判断需要进入合并阶段</td><td style="padding:8px">引擎 (Execute 内)</td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px">running</td><td style="padding:8px">completed</td>
+      <td style="padding:8px">引擎判断所有数据已处理完毕</td><td style="padding:8px">引擎 (Execute 内)</td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px">running</td><td style="padding:8px">failed</td>
+      <td style="padding:8px">Execute 返回不可恢复错误</td><td style="padding:8px">框架</td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px">*</td><td style="padding:8px">canceled</td>
+      <td style="padding:8px">外部通过 ctx 取消</td><td style="padding:8px">框架</td>
+    </tr>
+  </table>
+</div>
