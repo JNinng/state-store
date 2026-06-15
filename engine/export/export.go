@@ -178,6 +178,10 @@ func (e *ExportEngine) Compensate(ctx context.Context, targetLSN int64) error {
 }
 
 func (e *ExportEngine) Progress(state statestore.BaseTaskState) int {
+	if state.Phase == statestore.PhaseCompleted {
+		return 100
+	}
+
 	var p ExportPayload
 	if len(state.Payload) > 0 {
 		json.Unmarshal(state.Payload, &p)
