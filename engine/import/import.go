@@ -13,8 +13,8 @@ import (
 	"state-store/statestore"
 )
 
-// ImportPayload 是导入任务的业务扩展状态。
-type ImportPayload struct {
+// Payload 是导入任务的业务扩展状态。
+type Payload struct {
 	CurrentReadOffset int64 `json:"current_read_offset"`
 	CurrentBatchIdx   int   `json:"current_batch_idx"`
 	TotalBatches      int   `json:"total_batches"`
@@ -22,24 +22,24 @@ type ImportPayload struct {
 	FailedRows        int64 `json:"failed_rows"`
 }
 
-// ImportEngine 实现 engine.Engine 接口，从源文件读取并批量写入目标。
-type ImportEngine struct {
+// Engine 实现 engine.Engine 接口，从源文件读取并批量写入目标。
+type Engine struct {
 	srcPath   string
 	target    phys.DataTarget
 	batchSize int
 }
 
-// ImportOption 是 ImportEngine 的配置函数。
-type ImportOption func(*ImportEngine)
+// Option 是 Engine 的配置函数。
+type Option func(*Engine)
 
 // WithBatchSize 设置每批次行数，默认 1000。
-func WithBatchSize(n int) ImportOption {
-	return func(e *ImportEngine) { e.batchSize = n }
+func WithBatchSize(n int) Option {
+	return func(e *Engine) { e.batchSize = n }
 }
 
-// New 创建 ImportEngine。
-func New(srcPath string, target phys.DataTarget, opts ...ImportOption) *ImportEngine {
-	e := &ImportEngine{
+// New 创建 Engine。
+func New(srcPath string, target phys.DataTarget, opts ...Option) *Engine {
+	e := &Engine{
 		srcPath:   srcPath,
 		target:    target,
 		batchSize: 1000,
@@ -51,12 +51,12 @@ func New(srcPath string, target phys.DataTarget, opts ...ImportOption) *ImportEn
 }
 
 // 编译期检查
-var _ engine.Engine = (*ImportEngine)(nil)
+var _ engine.Engine = (*Engine)(nil)
 
-func (e *ImportEngine) TaskType() string { return "import" }
+func (e *Engine) TaskType() string { return "import" }
 
-func (e *ImportEngine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
-	var p ImportPayload
+func (e *Engine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
+	var p Payload
 	if len(state.Payload) > 0 {
 		if err := json.Unmarshal(state.Payload, &p); err != nil {
 			return 0, fmt.Errorf("import: unmarshal payload: %w", err)
@@ -65,7 +65,7 @@ func (e *ImportEngine) Execute(ctx context.Context, state *statestore.BaseTaskSt
 
 	switch state.Phase {
 	case statestore.PhasePending:
-		p = ImportPayload{}
+		p = Payload{}
 		state.Phase = statestore.PhaseRunning
 		state.Message = "import started"
 		state.Payload = e.marshalPayload(&p)
@@ -79,7 +79,7 @@ func (e *ImportEngine) Execute(ctx context.Context, state *statestore.BaseTaskSt
 	}
 }
 
-func (e *ImportEngine) executeRunning(ctx context.Context, state *statestore.BaseTaskState, p *ImportPayload) (int64, error) {
+func (e *Engine) executeRunning(ctx context.Context, state *statestore.BaseTaskState, p *Payload) (int64, error) {
 	f, err := os.Open(e.srcPath)
 	if err != nil {
 		return 0, fmt.Errorf("import: open source: %w", err)
@@ -142,7 +142,7 @@ func (e *ImportEngine) executeRunning(ctx context.Context, state *statestore.Bas
 	return p.CurrentReadOffset, nil
 }
 
-func (e *ImportEngine) Compensate(ctx context.Context, targetLSN int64) error {
+func (e *Engine) Compensate(ctx context.Context, targetLSN int64) error {
 	info, err := os.Stat(e.srcPath)
 	if err != nil {
 		return fmt.Errorf("import: stat source: %w", err)
@@ -154,8 +154,8 @@ func (e *ImportEngine) Compensate(ctx context.Context, targetLSN int64) error {
 	return nil
 }
 
-func (e *ImportEngine) Progress(state statestore.BaseTaskState) int {
-	var p ImportPayload
+func (e *Engine) Progress(state statestore.BaseTaskState) int {
+	var p Payload
 	if len(state.Payload) > 0 {
 		json.Unmarshal(state.Payload, &p)
 	}
@@ -170,7 +170,7 @@ func (e *ImportEngine) Progress(state statestore.BaseTaskState) int {
 	return prog
 }
 
-func (e *ImportEngine) marshalPayload(p *ImportPayload) json.RawMessage {
+func (e *Engine) marshalPayload(p *Payload) json.RawMessage {
 	data, _ := json.Marshal(p)
 	return data
 }

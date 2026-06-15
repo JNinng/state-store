@@ -14,8 +14,8 @@ import (
 	"state-store/statestore"
 )
 
-// ExportPayload 是导出任务的业务扩展状态。
-type ExportPayload struct {
+// Payload 是导出任务的业务扩展状态。
+type Payload struct {
 	CurrentPage      int   `json:"current_page"`
 	CurrentChunkIdx  int   `json:"current_chunk_idx"`
 	CurrentChunkSize int64 `json:"current_chunk_size"`
@@ -24,8 +24,8 @@ type ExportPayload struct {
 	MergedChunkIdx   int   `json:"merged_chunk_idx"`
 }
 
-// ExportEngine 实现 engine.Engine 接口，执行分页提取→分块写文件→合并的导出流程。
-type ExportEngine struct {
+// Engine 实现 engine.Engine 接口，执行分页提取→分块写文件→合并的导出流程。
+type Engine struct {
 	src        phys.DataSource
 	outputDir  string
 	outputFile string
@@ -33,22 +33,22 @@ type ExportEngine struct {
 	chunkPages int
 }
 
-// ExportOption 是 ExportEngine 的配置函数。
-type ExportOption func(*ExportEngine)
+// Option 是 Engine 的配置函数。
+type Option func(*Engine)
 
 // WithPageSize 设置每页行数，默认 1000。
-func WithPageSize(n int) ExportOption {
-	return func(e *ExportEngine) { e.pageSize = n }
+func WithPageSize(n int) Option {
+	return func(e *Engine) { e.pageSize = n }
 }
 
 // WithChunkPages 设置每个分块包含的页数，默认 10。
-func WithChunkPages(n int) ExportOption {
-	return func(e *ExportEngine) { e.chunkPages = n }
+func WithChunkPages(n int) Option {
+	return func(e *Engine) { e.chunkPages = n }
 }
 
-// New 创建 ExportEngine。
-func New(src phys.DataSource, outputDir, outputFile string, opts ...ExportOption) *ExportEngine {
-	e := &ExportEngine{
+// New 创建 Engine。
+func New(src phys.DataSource, outputDir, outputFile string, opts ...Option) *Engine {
+	e := &Engine{
 		src:        src,
 		outputDir:  outputDir,
 		outputFile: outputFile,
@@ -62,12 +62,12 @@ func New(src phys.DataSource, outputDir, outputFile string, opts ...ExportOption
 }
 
 // 编译期检查
-var _ engine.Engine = (*ExportEngine)(nil)
+var _ engine.Engine = (*Engine)(nil)
 
-func (e *ExportEngine) TaskType() string { return "export" }
+func (e *Engine) TaskType() string { return "export" }
 
-func (e *ExportEngine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
-	var p ExportPayload
+func (e *Engine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
+	var p Payload
 	if len(state.Payload) > 0 {
 		if err := json.Unmarshal(state.Payload, &p); err != nil {
 			return 0, fmt.Errorf("export: unmarshal payload: %w", err)
@@ -76,7 +76,7 @@ func (e *ExportEngine) Execute(ctx context.Context, state *statestore.BaseTaskSt
 
 	switch state.Phase {
 	case statestore.PhasePending:
-		p = ExportPayload{}
+		p = Payload{}
 		state.Phase = statestore.PhaseRunning
 		state.Payload = e.marshalPayload(p)
 		return 0, nil
@@ -92,7 +92,7 @@ func (e *ExportEngine) Execute(ctx context.Context, state *statestore.BaseTaskSt
 	}
 }
 
-func (e *ExportEngine) executeRunning(ctx context.Context, state *statestore.BaseTaskState, p *ExportPayload) (int64, error) {
+func (e *Engine) executeRunning(ctx context.Context, state *statestore.BaseTaskState, p *Payload) (int64, error) {
 	rows, err := e.src.FetchPage(ctx, p.CurrentPage, e.pageSize)
 	if err == io.EOF {
 		p.TotalChunks = p.CurrentChunkIdx
@@ -133,7 +133,7 @@ func (e *ExportEngine) executeRunning(ctx context.Context, state *statestore.Bas
 	return e.calcLSN(*p), nil
 }
 
-func (e *ExportEngine) executeMerging(ctx context.Context, state *statestore.BaseTaskState, p *ExportPayload) (int64, error) {
+func (e *Engine) executeMerging(ctx context.Context, state *statestore.BaseTaskState, p *Payload) (int64, error) {
 	if p.MergedChunkIdx >= p.TotalChunks {
 		state.Phase = statestore.PhaseCompleted
 		state.Message = "export completed"
@@ -167,7 +167,7 @@ func (e *ExportEngine) executeMerging(ctx context.Context, state *statestore.Bas
 	return p.FinalFileSize, nil
 }
 
-func (e *ExportEngine) Compensate(ctx context.Context, targetLSN int64) error {
+func (e *Engine) Compensate(ctx context.Context, targetLSN int64) error {
 	finalPath := filepath.Join(e.outputDir, e.outputFile)
 	if info, err := os.Stat(finalPath); err == nil && info.Size() > targetLSN {
 		if err := os.Truncate(finalPath, targetLSN); err != nil {
@@ -177,12 +177,12 @@ func (e *ExportEngine) Compensate(ctx context.Context, targetLSN int64) error {
 	return nil
 }
 
-func (e *ExportEngine) Progress(state statestore.BaseTaskState) int {
+func (e *Engine) Progress(state statestore.BaseTaskState) int {
 	if state.Phase == statestore.PhaseCompleted {
 		return 100
 	}
 
-	var p ExportPayload
+	var p Payload
 	if len(state.Payload) > 0 {
 		json.Unmarshal(state.Payload, &p)
 	}
@@ -202,24 +202,24 @@ func (e *ExportEngine) Progress(state statestore.BaseTaskState) int {
 	return prog
 }
 
-func (e *ExportEngine) calcLSN(p ExportPayload) int64 {
+func (e *Engine) calcLSN(p Payload) int64 {
 	return int64(p.CurrentChunkIdx)*e.chunkSize() + p.CurrentChunkSize
 }
 
-func (e *ExportEngine) chunkSize() int64 {
+func (e *Engine) chunkSize() int64 {
 	return int64(e.pageSize * e.chunkPages)
 }
 
-func (e *ExportEngine) chunkPath(idx int) string {
+func (e *Engine) chunkPath(idx int) string {
 	return filepath.Join(e.outputDir, fmt.Sprintf("%s.chunk_%d.tmp", e.outputFile, idx))
 }
 
-func (e *ExportEngine) marshalPayload(p ExportPayload) json.RawMessage {
+func (e *Engine) marshalPayload(p Payload) json.RawMessage {
 	data, _ := json.Marshal(p)
 	return data
 }
 
-func (e *ExportEngine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
+func (e *Engine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
 	var total int64
 	for _, row := range rows {
 		data, err := json.Marshal(row)
@@ -235,14 +235,14 @@ func (e *ExportEngine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
 	return total, nil
 }
 
-func (e *ExportEngine) cleanupChunks(total int) {
+func (e *Engine) cleanupChunks(total int) {
 	for i := 0; i < total; i++ {
 		os.Remove(e.chunkPath(i))
 	}
 }
 
 // Cleanup 清理导出过程中产生的分块文件。应在 Run() 成功返回后调用。
-func (e *ExportEngine) Cleanup() {
+func (e *Engine) Cleanup() {
 	entries, _ := os.ReadDir(e.outputDir)
 	prefix := e.outputFile + ".chunk_"
 	for _, entry := range entries {
