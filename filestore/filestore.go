@@ -32,7 +32,7 @@ func (r *FileRepository) Load(ctx context.Context, taskID string) ([]byte, error
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrLoadFailed, err)
+		return nil, fmt.Errorf("filestore: load %s: %v", taskID, err)
 	}
 	return data, nil
 }
@@ -48,25 +48,25 @@ func (r *FileRepository) Save(ctx context.Context, taskID string, state []byte) 
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("%w: create tmp: %v", ErrSaveFailed, err)
+		return fmt.Errorf("filestore: save %s: create tmp: %v", taskID, err)
 	}
 
 	if _, err := f.Write(state); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("%w: write tmp: %v", ErrSaveFailed, err)
+		return fmt.Errorf("filestore: save %s: write tmp: %v", taskID, err)
 	}
 
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("%w: sync tmp: %v", ErrSaveFailed, err)
+		return fmt.Errorf("filestore: save %s: sync tmp: %v", taskID, err)
 	}
 	f.Close()
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("%w: rename: %v", ErrSaveFailed, err)
+		return fmt.Errorf("filestore: save %s: rename: %v", taskID, err)
 	}
 
 	return nil
@@ -104,9 +104,3 @@ func (r *FileRepository) statePath(taskID string) string {
 func (r *FileRepository) tmpPath(taskID string) string {
 	return filepath.Join(r.dir, taskID+".state.tmp")
 }
-
-// Sentinel errors for filestore package
-var (
-	ErrLoadFailed = fmt.Errorf("filestore: load failed")
-	ErrSaveFailed = fmt.Errorf("filestore: save failed")
-)
