@@ -2,6 +2,7 @@ package importpkg
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -90,24 +91,29 @@ func (e *Engine) executeRunning(ctx context.Context, state *statestore.BaseTaskS
 		return 0, fmt.Errorf("import: seek to %d: %w", p.CurrentReadOffset, err)
 	}
 
-	// Use bufio.Scanner to read line-by-line and track byte offset precisely.
-	// json.NewDecoder buffers internally, which makes offset tracking unreliable.
-	scanner := bufio.NewScanner(f)
+	// Use bufio.Reader.ReadBytes('\n') to track byte offset precisely.
+	// Unlike bufio.Scanner (which strips \r via dropCR and loses byte count),
+	// ReadBytes returns raw bytes including the delimiter, so offset tracking
+	// is accurate for any newline style (\n, \r\n, or final line without newline).
+	reader := bufio.NewReader(f)
 	var rows []phys.Row
 	offset := p.CurrentReadOffset
 	eof := false
 
 	for i := 0; i < e.batchSize; i++ {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return 0, fmt.Errorf("import: scan at offset %d: %w", offset, err)
+		rawLine, err := reader.ReadBytes('\n')
+		if err == io.EOF {
+			if len(rawLine) == 0 {
+				eof = true
+				break
 			}
 			eof = true
-			break
+		} else if err != nil {
+			return 0, fmt.Errorf("import: read at offset %d: %w", offset, err)
 		}
-		line := scanner.Bytes()
-		// Advance offset past this line (including newline consumed by Scanner)
-		offset += int64(len(line) + 1) // Scanner strips the newline, so +1
+		// len(rawLine) is exact bytes consumed — includes \n or \r\n
+		offset += int64(len(rawLine))
+		line := bytes.TrimRight(rawLine, "\r\n")
 
 		var row phys.Row
 		if err := json.Unmarshal(line, &row); err != nil {
