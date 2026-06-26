@@ -24,6 +24,9 @@ func New(dir string) (*FileRepository, error) {
 
 // Load 读取任务状态文件。任务不存在返回 nil, nil。
 func (r *FileRepository) Load(ctx context.Context, taskID string) ([]byte, error) {
+	// 自动清理上次崩溃可能残留的 .tmp（不存在则忽略）
+	os.Remove(r.tmpPath(taskID))
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
