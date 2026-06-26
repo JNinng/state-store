@@ -236,9 +236,6 @@ func TestEngine_Progress(t *testing.T) {
 }
 
 func TestEngine_IdempotentExecute_RunningPhase(t *testing.T) {
-	t.Skip("Known idempotency gap: Compensate does not roll back chunk files, " +
-		"so re-executing from a stale checkpoint duplicates data. " +
-		"Remove this skip when the chunk-file Compensate fix is implemented.")
 
 	dir := t.TempDir()
 

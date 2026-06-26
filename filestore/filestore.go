@@ -16,11 +16,15 @@ type FileRepository struct {
 }
 
 // New 创建 FileRepository。若目录不存在则自动创建。
+// 自动清理上一次进程崩溃可能残留的孤儿 .tmp 文件。
 func New(dir string) (*FileRepository, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("filestore: create dir %s: %w", dir, err)
 	}
-	return &FileRepository{dir: dir}, nil
+	r := &FileRepository{dir: dir}
+	// 自动清理上次崩溃残留（忽略错误，非关键路径）
+	r.Cleanup()
+	return r, nil
 }
 
 // Load 读取任务状态文件。任务不存在返回 nil, nil。

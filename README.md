@@ -65,12 +65,12 @@ func main() {
         export.WithChunkPages(10),
     )
 
-    // 3. 运行任务（自动崩溃恢复）
+    // 3. 运行任务（自动崩溃恢复 + 断点续传）
     if err := engine.Run(ctx, repo, eng, "export-001"); err != nil {
         panic(err)
     }
 
-    // 4. 清理临时文件
+    // 4. 清理分块临时文件
     eng.(*export.Engine).Cleanup()
 }
 ```
@@ -190,19 +190,20 @@ func (e *MyEngine) Progress(state statestore.BaseTaskState) int {
 ```
 
 **关键契约：**
+- **时序约定**：`Execute` 先执行物理副作用，框架后保存 checkpoint。崩溃恢复时物理系统可能领先于 checkpoint，`Compensate` 只需截断/回退，无需前滚。
 - `Execute` 必须是幂等步骤——同一步可能因崩溃而重新执行
 - `Compensate` 应回滚/截断超出 LSN 的部分，而非追加
 - Payload 使用 `json.RawMessage`，由引擎自行序列化/反序列化
+- **副作用约束**：`Execute` 的物理副作用必须可补偿（可截断或可幂等重放）。不可逆操作（发邮件、扣款、发送消息队列等）应在调度层使用 outbox / saga 模式处理
 
 ## 持久化后端
 
 ### FileRepository (`filestore`)
 
-基于本地文件系统，使用 **写 .tmp → Sync → Rename** 保证写入原子性。状态文件以 `.state` 为后缀，存放在指定目录下。
+基于本地文件系统，使用 **写 .tmp → Sync → Rename** 保证写入原子性。状态文件以 `.state` 为后缀，存放在指定目录下。`New()` 自动清理上次崩溃残留的 `.tmp` 文件。
 
 ```go
 repo, _ := filestore.New("/var/state-store/tasks")
-defer repo.Cleanup() // 清理崩溃残留的 .tmp 文件
 ```
 
 ### 自定义后端
@@ -221,6 +222,20 @@ type StateRepository interface {
 - `Load` 对不存在的任务返回 `(nil, nil)`，不返回 error
 - `Save` 为原子全量替换，不允许部分合并
 - `Delete` 幂等，删除不存在的任务不报错
+
+## 运行时配置
+
+### 重试机制
+
+`Run()` 支持通过 `WithRetry` 选项启用 Execute 步骤的自动重试，适用于网络抖动等瞬态错误：
+
+```go
+engine.Run(ctx, repo, eng, "task-001",
+    engine.WithRetry(3, 5*time.Second), // 最多重试 3 次，间隔 5 秒
+)
+```
+
+重试仅适用于 `Execute` 步骤；`Load` / `Save` / `Compensate` 错误不重试。
 
 ## 物理层抽象
 

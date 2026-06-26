@@ -109,9 +109,25 @@ func (e *Engine) executeRunning(ctx context.Context, state *statestore.BaseTaskS
 	}
 
 	chunkPath := e.chunkPath(p.CurrentChunkIdx)
-	f, err := os.OpenFile(chunkPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(chunkPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return 0, fmt.Errorf("export: open chunk %d: %w", p.CurrentChunkIdx, err)
+	}
+
+	// Truncate chunk file to known-safe size before appending.
+	// If a previous Execute wrote data but the checkpoint was not saved,
+	// the file may contain excess bytes beyond CurrentChunkSize.
+	// Truncation ensures idempotent re-execution: the same rows are
+	// rewritten from the checkpointed position without duplication.
+	if info, err := f.Stat(); err == nil && info.Size() > p.CurrentChunkSize {
+		if err := f.Truncate(p.CurrentChunkSize); err != nil {
+			f.Close()
+			return 0, fmt.Errorf("export: truncate chunk %d: %w", p.CurrentChunkIdx, err)
+		}
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		return 0, fmt.Errorf("export: seek chunk %d: %w", p.CurrentChunkIdx, err)
 	}
 
 	written, err := e.writeRows(f, rows)
