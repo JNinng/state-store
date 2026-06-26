@@ -69,7 +69,8 @@ func Run(ctx context.Context, repo statestore.StateRepository, eng Engine, taskI
 	// 3. 主循环
 	for state.Phase == statestore.PhasePending ||
 		state.Phase == statestore.PhaseRunning ||
-		state.Phase == statestore.PhaseMerging {
+		state.Phase == statestore.PhaseMerging ||
+		state.Phase == statestore.PhaseVerifying {
 
 		select {
 		case <-ctx.Done():
