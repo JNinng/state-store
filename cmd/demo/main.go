@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"state-store/engine"
 	"state-store/engine/export"
 	importpkg "state-store/engine/import"
 	"state-store/filestore"
+	"state-store/outbox"
 	"state-store/phys"
 	"state-store/statestore"
 )
@@ -93,6 +95,87 @@ func countLines(data []byte) int {
 	}
 	return n
 }
+
+// countNonEmptyLines 统计文件中非空行数
+func countNonEmptyLines(data []byte) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// countMatchingLines 统计文件中包含指定子串的行数
+func countMatchingLines(data []byte, substr string) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// dedupLines 对文件内容按行去重，返回去重后的行数
+func dedupLines(data []byte) int {
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			seen[line] = true
+		}
+	}
+	return len(seen)
+}
+
+// notifyEngine 是一个在 Payload 中嵌入 outbox 消息的演示引擎。
+// 展示调度层如何使用 outbox 模式：引擎只写意图，不可逆操作由调度层分发。
+type notifyEngine struct {
+	taskID   string
+	messages []*outbox.Message
+}
+
+func newNotifyEngine(taskID string, messages []*outbox.Message) *notifyEngine {
+	return &notifyEngine{taskID: taskID, messages: messages}
+}
+
+func (e *notifyEngine) TaskType() string { return "notify_demo" }
+
+func (e *notifyEngine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
+	switch state.Phase {
+	case statestore.PhasePending:
+		state.Phase = statestore.PhaseRunning
+		outboxData, _ := json.Marshal(e.messages)
+		state.Payload = json.RawMessage(fmt.Sprintf(`{"outbox":%s}`, string(outboxData)))
+		return 0, nil
+	case statestore.PhaseRunning:
+		state.Phase = statestore.PhaseCompleted
+		state.Message = "notify task completed"
+		return 100, nil
+	default:
+		return state.CheckpointLSN, nil
+	}
+}
+
+func (e *notifyEngine) Compensate(ctx context.Context, targetLSN int64) error {
+	return nil
+}
+
+func (e *notifyEngine) Progress(state statestore.BaseTaskState) int {
+	if state.Phase == statestore.PhaseCompleted {
+		return 100
+	}
+	return 50
+}
+
+// ExtractOutboxMessages 从 Payload 中提取 outbox 消息。
+func (e *notifyEngine) ExtractOutboxMessages() ([]*outbox.Message, error) {
+	return e.messages, nil
+}
+
+var _ engine.Engine = (*notifyEngine)(nil)
 
 func main() {
 	ctx := context.Background()
@@ -331,7 +414,423 @@ func main() {
 	fmt.Println()
 
 	// ==========================================================
-	// 阶段五：总结
+	// 阶段五：Outbox 模式 — 文件通知示例
+	//   演示调度层如何使用 Outbox 模式处理不可逆操作。
+	//   场景：导出完成后发"通知"写入文件。
+	//   写文件本身是可逆的（可截断），但这里模拟的场景是：
+	//   多个下游消费者依赖这个"通知文件"来触发后续动作
+	//   （如发送真实邮件、调用 webhook）。一旦文件被消费者读取，
+	//   就无法撤回——因此"通知写入"应通过 outbox 在调度层处理。
+	//
+	//   同时展示 at-least-once 特性：handler 写入成功但 ack 前
+	//   崩溃，重启后消息重新分发→文件出现重复行。
+	// ==========================================================
+	fmt.Println("╔══════════════════════════════════════════════╗")
+	fmt.Println("║  阶段五：Outbox 模式（文件通知 + at-least-once）║")
+	fmt.Println("╚══════════════════════════════════════════════╝")
+	fmt.Println()
+
+	// ---- 5a. 准备 ----
+	notifyLogPath := filepath.Join(workDir, "notifications.log")
+
+	outboxStore := outbox.NewInMemoryStore()
+	registry := outbox.NewHandlerRegistry()
+
+	// 注册 Handler：将通知内容写入文件（模拟真实不可逆操作）
+	registry.Register("write_notification", func(msg *outbox.Message) error {
+		f, err := os.OpenFile(notifyLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		var payload map[string]string
+		json.Unmarshal(msg.Payload, &payload)
+		line := fmt.Sprintf("[%s] task=%s, event=%s\n", msg.ID, payload["task_id"], payload["message"])
+		if _, err := f.WriteString(line); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	fmt.Println("Handler 已注册: write_notification → 追加写入 notifications.log")
+	fmt.Println()
+
+	// ---- 5b. 正常流程：engine.Run + outbox 分发 ----
+	fmt.Println("--- 5b. 正常流程：engine.Run 完成后分发 outbox ---")
+
+	normalNotifyEng := newNotifyEngine("export-task-normal", []*outbox.Message{
+		{ID: "notify-001", EventType: "write_notification", Payload: json.RawMessage(`{"task_id":"export-task-normal","message":"export completed successfully"}`)},
+	})
+	normalNotifyRepo, _ := filestore.New(filepath.Join(workDir, "notify-normal-state"))
+
+	if err := engine.Run(ctx, normalNotifyRepo, normalNotifyEng, "export-task-normal"); err != nil {
+		panic(err)
+	}
+
+	// 从引擎 Payload 提取 outbox 消息并写入 Store
+	msgs, _ := normalNotifyEng.ExtractOutboxMessages()
+	for _, m := range msgs {
+		m.Status = outbox.StatusPending
+		outboxStore.Append(ctx, m)
+	}
+	fmt.Printf("  引擎执行完成，提取到 %d 条 outbox 消息\n", len(msgs))
+
+	// 分发 outbox 消息
+	dispatcher := outbox.NewDispatcher(outboxStore, registry)
+	processed, _ := dispatcher.DispatchPending(ctx)
+	fmt.Printf("  Dispatcher 处理完成: %d 条消息已分发\n", processed)
+
+	normalNotifyData, _ := os.ReadFile(notifyLogPath)
+	fmt.Printf("  notifications.log: %d 行\n", countLines(normalNotifyData))
+	fmt.Println()
+
+	// ---- 5c. at-least-once 演示：写成功但 ack 前崩溃 → 重复 ----
+	//   经典 at-least-once 故障：
+	//   Handler 已成功写入文件（副作用已发生），但在 MarkProcessed
+	//   之前进程崩溃。消息状态未更新 → 重启后被重新分发 → 再次写入
+	//   → 文件出现重复行。
+	fmt.Println("--- 5c. at-least-once 演示：写成功但 ack 失败 → 重复 ---")
+
+	os.Remove(notifyLogPath)
+
+	dupStore := outbox.NewInMemoryStore()
+	dupRegistry := outbox.NewHandlerRegistry()
+
+	// 准备 3 条 outbox 消息
+	dupMessages := []*outbox.Message{
+		{ID: "dup-001", EventType: "write_notification", Payload: json.RawMessage(`{"task_id":"dup-task","message":"phase 1 done"}`)},
+		{ID: "dup-002", EventType: "write_notification", Payload: json.RawMessage(`{"task_id":"dup-task","message":"phase 2 done"}`)},
+		{ID: "dup-003", EventType: "write_notification", Payload: json.RawMessage(`{"task_id":"dup-task","message":"phase 3 done"}`)},
+	}
+	for _, m := range dupMessages {
+		m.Status = outbox.StatusPending
+		dupStore.Append(ctx, m)
+	}
+
+	dupRegistry.Register("write_notification", func(msg *outbox.Message) error {
+		f, err := os.OpenFile(notifyLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		var payload map[string]string
+		json.Unmarshal(msg.Payload, &payload)
+		fmt.Fprintf(f, "[%s] task=%s, event=%s\n", msg.ID, payload["task_id"], payload["message"])
+		return nil
+	})
+
+	// 模拟分发循环：dup-001 正常完成 → dup-002 写入成功但 ack 前崩溃
+	func() {
+		defer func() { recover() }()
+		pending, _ := dupStore.FetchPending(ctx)
+
+		// msg 0: dup-001 — 写入 + MarkProcessed 都成功
+		msg := pending[0]
+		fmt.Printf("  [dup-001] 写入文件 → MarkProcessed ✓\n")
+		dupStore.UpdateStatus(ctx, msg.ID, outbox.StatusProcessing, 0, "")
+		dupRegistry.Get(msg.EventType)(msg)
+		dupStore.MarkProcessed(ctx, msg.ID)
+
+		// msg 1: dup-002 — 写入成功，但 MarkProcessed 之前进程崩溃！
+		msg = pending[1]
+		fmt.Printf("  [dup-002] 写入文件 ✓ → MarkProcessed 之前进程崩溃!\n")
+		dupStore.UpdateStatus(ctx, msg.ID, outbox.StatusProcessing, 0, "")
+		dupRegistry.Get(msg.EventType)(msg) // ★ 副作用已发生（文件已写入）
+		// ↓ 没有 MarkProcessed！进程在此处崩溃
+		panic("simulated crash after write but before ack")
+	}()
+
+	fmt.Printf("  崩溃后 outbox 状态: dup-001=%s, dup-002=%s, dup-003=%s\n",
+		dupStore.GetMessage("dup-001").Status,
+		dupStore.GetMessage("dup-002").Status,
+		dupStore.GetMessage("dup-003").Status)
+
+	partialData, _ := os.ReadFile(notifyLogPath)
+	fmt.Printf("  崩溃后 notifications.log: %d 行\n", countLines(partialData))
+	fmt.Println()
+
+	// 『重启』：新 dispatcher 扫描 outbox store
+	// dup-001: completed → 跳过
+	// dup-002: processing（已写入但未 ack）→ 回退为 pending → 重新分发！
+	// dup-003: pending → 正常分发
+	fmt.Println("  --- 重启 dispatcher ---")
+	fmt.Println("  dup-002 processing→回退pending 重发, dup-003 pending 首发送")
+
+	// 手动将 dup-002 回退到 pending（模拟进程崩溃后状态回退）
+	dupStore.UpdateStatus(ctx, "dup-002", outbox.StatusPending, 1, "crash before ack")
+
+	restartedRegistry := outbox.NewHandlerRegistry()
+	restartedRegistry.Register("write_notification", func(msg *outbox.Message) error {
+		f, err := os.OpenFile(notifyLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		var payload map[string]string
+		json.Unmarshal(msg.Payload, &payload)
+		fmt.Fprintf(f, "[%s] task=%s, event=%s\n", msg.ID, payload["task_id"], payload["message"])
+		return nil
+	})
+
+	restartedDispatcher := outbox.NewDispatcher(dupStore, restartedRegistry)
+	restarted, _ := restartedDispatcher.DispatchPending(ctx)
+	fmt.Printf("  重启后分发: %d 条\n", restarted)
+
+	finalNotifyData, _ := os.ReadFile(notifyLogPath)
+	totalNotifyLines := countLines(finalNotifyData)
+	// 按消息 ID 检测重复：同一 msg.ID 出现多次即为 at-least-once 重复
+	dupLines := countMatchingLines(finalNotifyData, "dup-002")
+	dup003Lines := countMatchingLines(finalNotifyData, "dup-003")
+
+	fmt.Println()
+	fmt.Printf("  最终文件内容 (%d 行):\n", totalNotifyLines)
+	for _, line := range strings.Split(string(finalNotifyData), "\n") {
+		if strings.TrimSpace(line) != "" {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+
+	// dup-002 在崩溃前写了 1 次，重启后又写了 1 次 → 共 2 次
+	if dupLines > 1 {
+		fmt.Printf("\n  ⚠ at-least-once 效果: dup-002 在文件中出现了 %d 次（预期 1 次）\n", dupLines)
+		fmt.Println("    dup-002 被写入了 2 次：第一次在崩溃前，第二次在重启后")
+		fmt.Println("    下游消费者必须实现幂等处理（如按 msg.ID 去重）")
+	} else {
+		fmt.Println("  (本次运行无重复)")
+	}
+	_ = dup003Lines
+	fmt.Println()
+
+	// ---- 5d. Outbox 模式总结 ----
+	fmt.Println("Outbox 模式关键要点：")
+	fmt.Println("  1. 引擎只写意图（Payload 中嵌入 outbox 记录）")
+	fmt.Println("  2. engine.Run 成功后，调度层提取并持久化 outbox 消息")
+	fmt.Println("  3. Dispatcher 分发 outbox 消息 → 执行真正的不可逆操作")
+	fmt.Println("  4. 保证 at-least-once 投递（消息不会丢失，但可能重复）")
+	fmt.Println("  5. Handler 实现必须幂等（按 msg.ID 去重 / UPSERT 等）")
+	fmt.Println()
+
+	// ==========================================================
+	// 阶段六：Saga 模式 — 多步文件操作 + 失败补偿
+	//   演示分布式事务的 Saga 编排。
+	//   场景：项目创建工作流——
+	//     Step 1: 创建项目目录
+	//     Step 2: 写入配置文件
+	//     Step 3: 创建索引文件
+	//   如果 Step 2 失败，补偿 Step 1（删除目录）。
+	// ==========================================================
+	fmt.Println("╔══════════════════════════════════════════════╗")
+	fmt.Println("║  阶段六：Saga 模式（多步文件操作 + 失败补偿）║")
+	fmt.Println("╚══════════════════════════════════════════════╝")
+	fmt.Println()
+
+	// ---- 6a. Saga 正常流程 ----
+	fmt.Println("--- 6a. Saga 正常流程：创建项目目录结构 ---")
+
+	sagaDir := filepath.Join(workDir, "saga-project")
+	configPath := filepath.Join(sagaDir, "config.json")
+	indexPath := filepath.Join(sagaDir, "index.json")
+
+	createSaga := &outbox.Saga{
+		Name:              "create_project",
+		DefaultMaxRetries: 1,
+		Steps: []outbox.SagaStep{
+			{
+				Name: "create_directory",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [action] 创建项目目录:", sagaDir)
+					if err := os.MkdirAll(sagaDir, 0755); err != nil {
+						return fmt.Errorf("mkdir: %w", err)
+					}
+					actx["dir_created"] = true
+					return nil
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 删除项目目录:", sagaDir)
+					return os.RemoveAll(sagaDir)
+				},
+			},
+			{
+				Name: "write_config",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					config := map[string]interface{}{"version": "1.0", "name": "demo-project"}
+					data, _ := json.MarshalIndent(config, "", "  ")
+					fmt.Printf("    [action] 写入配置文件: %s\n", configPath)
+					return os.WriteFile(configPath, data, 0644)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 删除配置文件:", configPath)
+					os.Remove(configPath)
+					return nil
+				},
+			},
+			{
+				Name: "create_index",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					index := map[string]interface{}{"files": []string{"config.json"}, "total": 1}
+					data, _ := json.MarshalIndent(index, "", "  ")
+					fmt.Printf("    [action] 创建索引文件: %s\n", indexPath)
+					return os.WriteFile(indexPath, data, 0644)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 删除索引文件:", indexPath)
+					os.Remove(indexPath)
+					return nil
+				},
+			},
+		},
+	}
+
+	sagaStore := outbox.NewInMemorySagaStore()
+	coordinator := outbox.NewSagaCoordinator(sagaStore)
+	sagaState, err := coordinator.Run(ctx, createSaga, "saga-normal-001")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("  Saga 状态: %s\n", sagaState.Status)
+	if info, err := os.Stat(configPath); err == nil {
+		fmt.Printf("  ✓ config.json 已创建 (%d bytes)\n", info.Size())
+	}
+	if info, err := os.Stat(indexPath); err == nil {
+		fmt.Printf("  ✓ index.json 已创建 (%d bytes)\n", info.Size())
+	}
+	fmt.Println()
+
+	// ---- 6b. Saga 失败补偿演示 ----
+	fmt.Println("--- 6b. Saga 失败补偿：第 2 步失败，回退第 1 步 ---")
+
+	os.RemoveAll(sagaDir)
+
+	failingSaga := &outbox.Saga{
+		Name:              "failing_project",
+		DefaultMaxRetries: 1,
+		Steps: []outbox.SagaStep{
+			{
+				Name: "create_directory",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [action] 创建项目目录:", sagaDir)
+					if err := os.MkdirAll(sagaDir, 0755); err != nil {
+						return fmt.Errorf("mkdir: %w", err)
+					}
+					actx["dir_created"] = true
+					return nil
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 回退：删除项目目录:", sagaDir)
+					return os.RemoveAll(sagaDir)
+				},
+			},
+			{
+				Name: "write_config",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Printf("    [action] 写入配置文件: %s\n", configPath)
+					return fmt.Errorf("disk full: cannot write config.json")
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 回退：删除配置文件（如果存在）")
+					os.Remove(configPath)
+					return nil
+				},
+			},
+			{
+				Name: "create_index",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Printf("    [action] 创建索引文件: %s\n", indexPath)
+					return os.WriteFile(indexPath, []byte("{}"), 0644)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [comp] 回退：删除索引文件")
+					os.Remove(indexPath)
+					return nil
+				},
+			},
+		},
+	}
+
+	failSagaState, err := coordinator.Run(ctx, failingSaga, "saga-fail-001")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("  Saga 状态: %s\n", failSagaState.Status)
+	fmt.Printf("  Step 0 (create_directory): %s (已补偿)\n", failSagaState.StepStatuses[0])
+	fmt.Printf("  Step 1 (write_config):    %s (失败)\n", failSagaState.StepStatuses[1])
+	fmt.Printf("  Step 2 (create_index):    %s (未执行)\n", failSagaState.StepStatuses[2])
+
+	if _, err := os.Stat(sagaDir); os.IsNotExist(err) {
+		fmt.Println("  ✓ 项目目录已被补偿操作删除")
+	} else {
+		fmt.Println("  ✗ 项目目录仍存在（补偿失败）")
+	}
+	fmt.Println()
+
+	// ---- 6c. Saga 崩溃恢复演示 ----
+	fmt.Println("--- 6c. Saga 崩溃恢复：checkpoint 后 resume ---")
+
+	os.RemoveAll(sagaDir)
+
+	resumeSaga := &outbox.Saga{
+		Name:              "resume_project",
+		DefaultMaxRetries: 1,
+		Steps: []outbox.SagaStep{
+			{
+				Name: "create_directory",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Println("    [action] 创建项目目录:", sagaDir)
+					return os.MkdirAll(sagaDir, 0755)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					return os.RemoveAll(sagaDir)
+				},
+			},
+			{
+				Name: "write_config",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Printf("    [action] 写入配置文件: %s\n", configPath)
+					return os.WriteFile(configPath, []byte(`{"version":"1.0"}`), 0644)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					os.Remove(configPath)
+					return nil
+				},
+			},
+			{
+				Name: "create_index",
+				Action: func(sctx context.Context, actx map[string]interface{}) error {
+					fmt.Printf("    [action] 创建索引文件: %s\n", indexPath)
+					return os.WriteFile(indexPath, []byte(`{"files":["config.json"]}`), 0644)
+				},
+				Compensation: func(sctx context.Context, actx map[string]interface{}) error {
+					os.Remove(indexPath)
+					return nil
+				},
+			},
+		},
+	}
+
+	resumeSagaStore := outbox.NewInMemorySagaStore()
+	resumeCoordinator := outbox.NewSagaCoordinator(resumeSagaStore)
+
+	resumeSagaState, _ := resumeCoordinator.Run(ctx, resumeSaga, "saga-resume-001")
+	fmt.Printf("  Saga 结果: %s\n", resumeSagaState.Status)
+	if resumeSagaState.Status == outbox.SagaCompleted {
+		fmt.Println("  ✓ 所有步骤已完成（SagaStore 可在崩溃后恢复）")
+	}
+	fmt.Println()
+
+	// ---- 6d. Saga 模式总结 ----
+	fmt.Println("Saga 模式关键要点：")
+	fmt.Println("  1. 每个步骤有 Action（正向操作）和 Compensation（回退操作）")
+	fmt.Println("  2. 任一步骤失败 → 按逆序执行已完成步骤的 Compensation")
+	fmt.Println("  3. 补偿失败不阻断其他补偿（记录并继续，需人工介入）")
+	fmt.Println("  4. Saga 状态通过 SagaStore 持久化 → 崩溃后可 Resume")
+	fmt.Println("  5. 适用于跨服务的分布式事务协调")
+	fmt.Println()
+
+	// ==========================================================
+	// 阶段七：总结
 	// ==========================================================
 	fmt.Println("╔══════════════════════════════════════════════╗")
 	fmt.Println("║  演示完成                                    ║")
@@ -343,4 +842,8 @@ func main() {
 	fmt.Println("  2. 崩溃重启后 engine.Run 自动 Load 状态")
 	fmt.Println("  3. 调用 Compensate 对齐物理系统到 LSN")
 	fmt.Println("  4. 从断点继续 Execute，直到完成")
+	fmt.Println()
+	fmt.Println("扩展模式（outbox 包）：")
+	fmt.Println("  5. Outbox 模式：不可逆操作在调度层通过 Store+Dispatcher 分发")
+	fmt.Println("  6. Saga 模式：多步骤事务通过 SagaCoordinator 编排 + 失败补偿")
 }
