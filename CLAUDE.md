@@ -13,6 +13,7 @@ go test ./...
 
 # Run tests for a single package
 go test ./engine/export/
+go test ./outbox/
 
 # Run a single test by name
 go test -run TestEngine_NormalFlow ./engine/export/
@@ -59,6 +60,47 @@ This is a **Go library (module: `state-store`, Go 1.26)** for orchestrating asyn
 
 **`filestore/` — File-based Persistence**
 - Implements `StateRepository` using local filesystem: **tmp write → Sync → Rename** for atomicity. Has `Cleanup()` to remove orphan `.state.tmp` files from crashed processes.
+
+**`outbox/` — Scheduling-Layer Outbox & Saga Patterns**
+
+Purpose: engine.Engine.Execute has a strict side-effect constraint — physical side effects must be compensatable (truncatable files, idempotent DB UPSERT). Irreversible operations (sending emails, deducting money, message queue sends) must NOT be performed directly in Execute. The `outbox/` package provides two patterns for the **scheduling layer** (the code that calls `engine.Run()`) to handle these safely:
+
+- **Outbox pattern**: Engines write "intent records" in their Payload. After `engine.Run()` succeeds, the scheduling layer extracts records into an `OutboxStore`, and a `Dispatcher` executes the actual irreversible operations with at-least-once delivery semantics.
+- **Saga pattern**: Multi-step distributed transactions where each step has a compensating action. The `SagaCoordinator` executes steps in order; if any fails, it runs compensations in reverse order.
+
+Key types:
+- `OutboxMessage` — a pending action (ID, TaskID, EventType, Payload, Status, Retries)
+- `OutboxStore` — persistence interface for outbox messages (`Append`, `FetchPending`, `MarkProcessed`, `MarkFailed`, `UpdateStatus`)
+- `Handler` / `HandlerRegistry` — map `EventType` → handler function (handlers must be idempotent)
+- `Dispatcher` — polls `OutboxStore` for pending messages, dispatches to registered handlers with retry support
+- `SagaStep` — a named step with `Action` (forward) and `Compensation` (rollback)
+- `SagaCoordinator` — orchestrates saga execution: run forward steps, retry on failure, compensate in reverse on step failure
+- `SagaStore` / `InMemorySagaStore` — persistence for saga state (checkpointable across crashes)
+- `SagaState` — serializable saga execution state (step statuses, action context, errors)
+
+Usage pattern (scheduling layer):
+```go
+// 1. Run the engine (reversible work with checkpoint protection)
+err := engine.Run(ctx, repo, eng, taskID)
+
+// 2. Extract outbox intents from final task state and persist
+for _, msg := range extractOutboxMessages(finalState) {
+    outboxStore.Append(ctx, msg)
+}
+
+// 3. Dispatch (execute the actual irreversible operations)
+dispatcher := outbox.NewDispatcher(outboxStore, registry)
+dispatcher.DispatchPending(ctx)
+
+// Or for saga orchestration:
+coordinator := outbox.NewSagaCoordinator(sagaStore)
+state, err := coordinator.Run(ctx, checkoutSaga, sagaID)
+if state.Status == outbox.SagaFailed {
+    // some compensations failed — manual intervention needed
+}
+```
+
+Testing: `outbox/outbox_test.go` includes integration examples showing how the scheduling layer composes `engine.Run()` with outbox dispatch and saga orchestration.
 
 ### Key Design Decisions
 
