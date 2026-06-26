@@ -235,12 +235,6 @@ func (e *Engine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
 	return total, nil
 }
 
-func (e *Engine) cleanupChunks(total int) {
-	for i := 0; i < total; i++ {
-		os.Remove(e.chunkPath(i))
-	}
-}
-
 // Cleanup 清理导出过程中产生的分块文件。应在 Run() 成功返回后调用。
 func (e *Engine) Cleanup() {
 	entries, _ := os.ReadDir(e.outputDir)
