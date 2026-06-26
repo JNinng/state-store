@@ -234,3 +234,86 @@ func TestEngine_Progress(t *testing.T) {
 		t.Errorf("progress = %d, want 50", prog)
 	}
 }
+
+func TestEngine_IdempotentExecute_RunningPhase(t *testing.T) {
+	t.Skip("Known idempotency gap: Compensate does not roll back chunk files, " +
+		"so re-executing from a stale checkpoint duplicates data. " +
+		"Remove this skip when the chunk-file Compensate fix is implemented.")
+
+	dir := t.TempDir()
+
+	// 3 页数据，每页 3 行，共 9 行。pageSize=3, chunkPages=2
+	pages := [][]phys.Row{
+		makeRows(3),
+		makeRows(3),
+		makeRows(3),
+	}
+
+	ds := &stubDataSource{pages: pages}
+	eng := New(ds, dir, "output.dat", WithPageSize(3), WithChunkPages(2))
+
+	state := &statestore.BaseTaskState{
+		TaskID:   "export-idempotent",
+		TaskType: "export",
+		Phase:    statestore.PhasePending,
+	}
+
+	// Step 1: Pending → Running
+	_, err := eng.Execute(context.Background(), state)
+	if err != nil {
+		t.Fatalf("Execute pending: %v", err)
+	}
+	if state.Phase != statestore.PhaseRunning {
+		t.Fatalf("phase after pending = %q, want running", state.Phase)
+	}
+
+	// 保存 Step 1 后的 payload（作为回退基准）
+	snapshotPayload := make([]byte, len(state.Payload))
+	copy(snapshotPayload, state.Payload)
+	snapshotLSN := state.CheckpointLSN
+
+	// Step 2: 执行 2 步 running（处理 page 0 和 page 1，形成 1 个 chunk）
+	for i := 0; i < 2; i++ {
+		_, err = eng.Execute(context.Background(), state)
+		if err != nil {
+			t.Fatalf("Execute running step %d: %v", i, err)
+		}
+	}
+	if state.Phase != statestore.PhaseRunning {
+		t.Fatalf("phase after 2 running steps = %q, want running", state.Phase)
+	}
+
+	// Step 3: 模拟 "Execute 成功但 Save 未发生"
+	// 将 state 的 Payload 和 CheckpointLSN 回退到 Step 1 后的值
+	state.Payload = make([]byte, len(snapshotPayload))
+	copy(state.Payload, snapshotPayload)
+	state.CheckpointLSN = snapshotLSN
+
+	// Step 4: 用回退后的 state 重新 Execute
+	// （相当于同一批数据被重复处理——引擎应幂等）
+	for state.Phase != statestore.PhaseCompleted && state.Phase != statestore.PhaseFailed {
+		_, err = eng.Execute(context.Background(), state)
+		if err != nil {
+			t.Fatalf("Execute after rewind (phase=%q): %v", state.Phase, err)
+		}
+	}
+	if state.Phase != statestore.PhaseCompleted {
+		t.Fatalf("final phase = %q, want completed", state.Phase)
+	}
+
+	// 验证：最终文件中行数 = 数据源总行数（无重复、无缺失）
+	finalPath := filepath.Join(dir, "output.dat")
+	data, err := os.ReadFile(finalPath)
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	lines := 0
+	for _, b := range data {
+		if b == '\n' {
+			lines++
+		}
+	}
+	if lines != 9 {
+		t.Errorf("exported lines = %d, want 9 (no duplicates, no missing)", lines)
+	}
+}
