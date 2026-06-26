@@ -17,6 +17,11 @@ type Engine interface {
 	// Execute 执行一步业务逻辑并返回新的安全偏移量（LSN）。
 	// state 为指针，引擎可修改 Phase / Message / Payload。
 	// Phase=pending 时引擎应初始化 Payload 并转为 running。
+	//
+	// 时序契约：Execute 先执行物理副作用（写文件、写数据库等），再返回新 LSN。
+	// 框架在 Execute 返回后保存 checkpoint。因此崩溃恢复时，物理系统可能领先于
+	// checkpoint——副作用已发生但 LSN 未记录。Compensate 只需将物理系统回退/截断
+	// 到 LSN，无需前滚。
 	Execute(ctx context.Context, state *statestore.BaseTaskState) (newLSN int64, err error)
 
 	// Compensate 将物理系统对齐到 targetLSN。
