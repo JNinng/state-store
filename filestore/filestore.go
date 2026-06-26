@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"state-store/statestore"
 	"strings"
 )
 
@@ -35,7 +36,7 @@ func (r *FileRepository) Load(ctx context.Context, taskID string) ([]byte, error
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("filestore: load %s: %v", taskID, err)
+		return nil, fmt.Errorf("filestore: load %s: %w", taskID, statestore.ErrLoadFailed)
 	}
 	return data, nil
 }
@@ -51,25 +52,25 @@ func (r *FileRepository) Save(ctx context.Context, taskID string, state []byte) 
 
 	f, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("filestore: save %s: create tmp: %v", taskID, err)
+		return fmt.Errorf("filestore: save %s: create tmp: %w", taskID, statestore.ErrSaveFailed)
 	}
 
 	if _, err := f.Write(state); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("filestore: save %s: write tmp: %v", taskID, err)
+		return fmt.Errorf("filestore: save %s: write tmp: %w", taskID, statestore.ErrSaveFailed)
 	}
 
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("filestore: save %s: sync tmp: %v", taskID, err)
+		return fmt.Errorf("filestore: save %s: sync tmp: %w", taskID, statestore.ErrSaveFailed)
 	}
 	f.Close()
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("filestore: save %s: rename: %v", taskID, err)
+		return fmt.Errorf("filestore: save %s: rename: %w", taskID, statestore.ErrSaveFailed)
 	}
 
 	return nil
