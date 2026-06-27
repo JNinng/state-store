@@ -23,6 +23,12 @@ go test -v ./...
 
 # Run the demo (export + import + recovery scenarios)
 go run ./cmd/demo/
+
+# Run individual examples (practical, focused usage patterns)
+go run ./cmd/examples/export/          # Export: paginated data → JSONL with checkpoint
+go run ./cmd/examples/import/          # Import: JSONL → data target with checkpoint
+go run ./cmd/examples/chunked-export/  # Chunked export: batch→shard→merge pipeline visible
+go run ./cmd/examples/outbox/          # Outbox + Saga: scheduling-layer patterns
 ```
 
 No linting or code generation tools are configured.
