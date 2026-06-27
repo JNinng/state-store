@@ -12,11 +12,11 @@ import (
 type SagaStatus string
 
 const (
-	SagaPending     SagaStatus = "pending"
-	SagaRunning     SagaStatus = "running"
+	SagaPending      SagaStatus = "pending"
+	SagaRunning      SagaStatus = "running"
 	SagaCompensating SagaStatus = "compensating"
-	SagaCompleted   SagaStatus = "completed"
-	SagaFailed      SagaStatus = "failed"
+	SagaCompleted    SagaStatus = "completed"
+	SagaFailed       SagaStatus = "failed"
 )
 
 // StepStatus 表示 Saga 中单个步骤的执行状态。
@@ -98,8 +98,8 @@ type SagaStore interface {
 
 // InMemorySagaStore 是 SagaStore 的内存实现。
 type InMemorySagaStore struct {
-	mu     sync.RWMutex
-	sagas  map[string]*SagaState
+	mu    sync.RWMutex
+	sagas map[string]*SagaState
 }
 
 // NewInMemorySagaStore 创建新的 InMemorySagaStore。
@@ -163,8 +163,8 @@ type Saga struct {
 //  4. 补偿过程中某个 Compensation 失败→记录失败但继续补偿其余步骤
 //     （补偿失败属于系统异常，需要人工介入或后台重试）
 type SagaCoordinator struct {
-	store      SagaStore
-	logger     Logger
+	store  SagaStore
+	logger Logger
 }
 
 // Logger 是简单的日志接口。

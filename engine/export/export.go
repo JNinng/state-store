@@ -24,13 +24,18 @@ type Payload struct {
 	MergedChunkIdx   int   `json:"merged_chunk_idx"`
 }
 
+// RowMarshaler 自定义行序列化逻辑。默认为 json.Marshal。
+// 可用于自定义日期格式、字段过滤、或透传预序列化的数据。
+type RowMarshaler func(row phys.Row) ([]byte, error)
+
 // Engine 实现 engine.Engine 接口，执行分页提取→分块写文件→合并的导出流程。
 type Engine struct {
-	src        phys.DataSource
-	outputDir  string
-	outputFile string
-	pageSize   int
-	chunkPages int
+	src          phys.DataSource
+	outputDir    string
+	outputFile   string
+	pageSize     int
+	chunkPages   int
+	rowMarshaler RowMarshaler
 }
 
 // Option 是 Engine 的配置函数。
@@ -44,6 +49,11 @@ func WithPageSize(n int) Option {
 // WithChunkPages 设置每个分块包含的页数，默认 10。
 func WithChunkPages(n int) Option {
 	return func(e *Engine) { e.chunkPages = n }
+}
+
+// WithRowMarshaler 设置自定义行序列化函数。默认使用 json.Marshal。
+func WithRowMarshaler(m RowMarshaler) Option {
+	return func(e *Engine) { e.rowMarshaler = m }
 }
 
 // New 创建 Engine。
@@ -238,7 +248,13 @@ func (e *Engine) marshalPayload(p Payload) json.RawMessage {
 func (e *Engine) writeRows(f *os.File, rows []phys.Row) (int64, error) {
 	var total int64
 	for _, row := range rows {
-		data, err := json.Marshal(row)
+		var data []byte
+		var err error
+		if e.rowMarshaler != nil {
+			data, err = e.rowMarshaler(row)
+		} else {
+			data, err = json.Marshal(row)
+		}
 		if err != nil {
 			return total, fmt.Errorf("export: marshal row: %w", err)
 		}

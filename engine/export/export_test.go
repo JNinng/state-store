@@ -1,6 +1,7 @@
 package export
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -312,5 +313,64 @@ func TestEngine_IdempotentExecute_RunningPhase(t *testing.T) {
 	}
 	if lines != 9 {
 		t.Errorf("exported lines = %d, want 9 (no duplicates, no missing)", lines)
+	}
+}
+
+func TestEngine_CustomRowMarshaler(t *testing.T) {
+	dir := t.TempDir()
+	pages := [][]phys.Row{
+		{{"id": 1.0, "name": "alice"}},
+		{{"id": 2.0, "name": "bob"}},
+	}
+	ds := &stubDataSource{pages: pages}
+
+	// 自定义序列化：将 key 转为大写，添加自定义字段
+	eng := New(ds, dir, "output.jsonl",
+		WithPageSize(1),
+		WithChunkPages(2),
+		WithRowMarshaler(func(row phys.Row) ([]byte, error) {
+			transformed := phys.Row{
+				"ID":        row["id"],
+				"NAME":      row["name"],
+				"EXPORT_AT": "2026-06-27T10:00:00Z",
+			}
+			return json.Marshal(transformed)
+		}),
+	)
+
+	state := &statestore.BaseTaskState{
+		TaskID:   "export-marshaler",
+		TaskType: "export",
+		Phase:    statestore.PhasePending,
+	}
+
+	for state.Phase != statestore.PhaseCompleted {
+		_, err := eng.Execute(context.Background(), state)
+		if err != nil {
+			t.Fatalf("Execute at phase=%q: %v", state.Phase, err)
+		}
+	}
+
+	finalPath := filepath.Join(dir, "output.jsonl")
+	data, _ := os.ReadFile(finalPath)
+
+	if !bytes.Contains(data, []byte(`"ID"`)) {
+		t.Error("output should contain uppercase key 'ID'")
+	}
+	if !bytes.Contains(data, []byte(`"EXPORT_AT"`)) {
+		t.Error("output should contain custom field 'EXPORT_AT'")
+	}
+	if bytes.Contains(data, []byte(`"id"`)) {
+		t.Error("output should NOT contain lowercase key 'id' (marshaler overrides default)")
+	}
+
+	lines := 0
+	for _, b := range data {
+		if b == '\n' {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Errorf("exported lines = %d, want 2", lines)
 	}
 }

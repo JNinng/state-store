@@ -4,7 +4,8 @@
 
 ## 概述
 
-`state-store` 为长时间运行的异步任务提供 **checkpoint / resume** 能力。它将任务状态检查点（checkpoint）协议抽象为通用框架，让引擎只需关注业务逻辑，框架自动处理初始化、状态持久化和崩溃恢复编排。
+`state-store` 为长时间运行的异步任务提供 **checkpoint / resume**
+能力。它将任务状态检查点（checkpoint）协议抽象为通用框架，让引擎只需关注业务逻辑，框架自动处理初始化、状态持久化和崩溃恢复编排。
 
 适用场景：数据导出/导入、ETL 流水线、批量数据处理等需要中断恢复的长时间任务。
 
@@ -14,19 +15,19 @@
 - [快速开始](#快速开始)
 - [架构](#架构)
 - [核心概念](#核心概念)
-  - [任务阶段](#任务阶段taskphase)
-  - [检查点 LSN](#检查点-lsn)
-  - [崩溃恢复流程](#崩溃恢复流程)
+    - [任务阶段](#任务阶段taskphase)
+    - [检查点 LSN](#检查点-lsn)
+    - [崩溃恢复流程](#崩溃恢复流程)
 - [内置引擎](#内置引擎)
-  - [Export 引擎](#export-引擎-engineexport)
-  - [Import 引擎](#import-引擎-engineimport)
+    - [Export 引擎](#export-引擎-engineexport)
+    - [Import 引擎](#import-引擎-engineimport)
 - [实现自定义引擎](#实现自定义引擎)
 - [持久化后端](#持久化后端)
-  - [FileRepository](#filerepository-filestore)
-  - [自定义后端](#自定义后端)
+    - [FileRepository](#filerepository-filestore)
+    - [自定义后端](#自定义后端)
 - [物理层抽象](#物理层抽象)
-  - [DataSource](#datasource导出数据源)
-  - [DataTarget](#datatarget导入目标)
+    - [DataSource](#datasource导出数据源)
+    - [DataTarget](#datatarget导入目标)
 - [测试](#测试)
 - [许可](#许可)
 
@@ -112,15 +113,15 @@ pending → running → merging → verifying → completed
                  canceled
 ```
 
-| 阶段 | 含义 |
-|------|------|
-| `pending` | 等待执行，需初始化 Payload |
-| `running` | 执行中，每步保存 checkpoint |
-| `merging` | 中间产物整合（导出专用） |
-| `verifying` | 结果校验（预留） |
-| `completed` | 成功完成 |
-| `failed` | 执行失败 |
-| `canceled` | 被取消 |
+| 阶段          | 含义                  |
+|-------------|---------------------|
+| `pending`   | 等待执行，需初始化 Payload   |
+| `running`   | 执行中，每步保存 checkpoint |
+| `merging`   | 中间产物整合（导出专用）        |
+| `verifying` | 结果校验（预留）            |
+| `completed` | 成功完成                |
+| `failed`    | 执行失败                |
+| `canceled`  | 被取消                 |
 
 ### 检查点 LSN
 
@@ -153,6 +154,7 @@ DataSource.FetchPage(page+1) → ...
 ```
 
 配置选项：
+
 - `WithPageSize(n)` — 每页行数，默认 1000
 - `WithChunkPages(n)` — 每个分块包含的页数，默认 10
 
@@ -161,6 +163,7 @@ DataSource.FetchPage(page+1) → ...
 逐行读取 JSONL 文件，批量写入 `phys.DataTarget`。使用 `bufio.Scanner` 精确追踪字节偏移，支持断点续传。
 
 配置选项：
+
 - `WithBatchSize(n)` — 每批次行数，默认 1000
 
 ## 实现自定义引擎
@@ -190,17 +193,21 @@ func (e *MyEngine) Progress(state statestore.BaseTaskState) int {
 ```
 
 **关键契约：**
-- **时序约定**：`Execute` 先执行物理副作用，框架后保存 checkpoint。崩溃恢复时物理系统可能领先于 checkpoint，`Compensate` 只需截断/回退，无需前滚。
+
+- **时序约定**：`Execute` 先执行物理副作用，框架后保存 checkpoint。崩溃恢复时物理系统可能领先于 checkpoint，`Compensate`
+  只需截断/回退，无需前滚。
 - `Execute` 必须是幂等步骤——同一步可能因崩溃而重新执行
 - `Compensate` 应回滚/截断超出 LSN 的部分，而非追加
 - Payload 使用 `json.RawMessage`，由引擎自行序列化/反序列化
-- **副作用约束**：`Execute` 的物理副作用必须可补偿（可截断或可幂等重放）。不可逆操作（发邮件、扣款、发送消息队列等）应在调度层使用 outbox / saga 模式处理
+- **副作用约束**：`Execute` 的物理副作用必须可补偿（可截断或可幂等重放）。不可逆操作（发邮件、扣款、发送消息队列等）应在调度层使用
+  outbox / saga 模式处理
 
 ## 持久化后端
 
 ### FileRepository (`filestore`)
 
-基于本地文件系统，使用 **写 .tmp → Sync → Rename** 保证写入原子性。状态文件以 `.state` 为后缀，存放在指定目录下。`New()` 自动清理上次崩溃残留的 `.tmp` 文件。
+基于本地文件系统，使用 **写 .tmp → Sync → Rename** 保证写入原子性。状态文件以 `.state` 为后缀，存放在指定目录下。`New()`
+自动清理上次崩溃残留的 `.tmp` 文件。
 
 ```go
 repo, _ := filestore.New("/var/state-store/tasks")
@@ -219,6 +226,7 @@ type StateRepository interface {
 ```
 
 约定：
+
 - `Load` 对不存在的任务返回 `(nil, nil)`，不返回 error
 - `Save` 为原子全量替换，不允许部分合并
 - `Delete` 幂等，删除不存在的任务不报错

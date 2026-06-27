@@ -23,11 +23,27 @@ type Payload struct {
 	FailedRows        int64 `json:"failed_rows"`
 }
 
+// RowUnmarshaler 自定义行反序列化逻辑。默认为 json.Unmarshal 到 phys.Row。
+// 可用于反序列化到自定义 struct、schema 校验、数据转换等场景。
+//
+// 示例 — 反序列化到 struct:
+//
+//	importpkg.WithRowUnmarshaler(func(line []byte) (phys.Row, error) {
+//	    var v myStruct
+//	    if err := json.Unmarshal(line, &v); err != nil {
+//	        return nil, err
+//	    }
+//	    // 校验 / 转换 v 的字段 ...
+//	    return phys.Row{"id": v.ID, "name": v.Name}, nil
+//	})
+type RowUnmarshaler func(line []byte) (phys.Row, error)
+
 // Engine 实现 engine.Engine 接口，从源文件读取并批量写入目标。
 type Engine struct {
-	srcPath   string
-	target    phys.DataTarget
-	batchSize int
+	srcPath        string
+	target         phys.DataTarget
+	batchSize      int
+	rowUnmarshaler RowUnmarshaler
 }
 
 // Option 是 Engine 的配置函数。
@@ -36,6 +52,11 @@ type Option func(*Engine)
 // WithBatchSize 设置每批次行数，默认 1000。
 func WithBatchSize(n int) Option {
 	return func(e *Engine) { e.batchSize = n }
+}
+
+// WithRowUnmarshaler 设置自定义行反序列化函数。默认使用 json.Unmarshal 到 phys.Row。
+func WithRowUnmarshaler(u RowUnmarshaler) Option {
+	return func(e *Engine) { e.rowUnmarshaler = u }
 }
 
 // New 创建 Engine。
@@ -116,8 +137,14 @@ func (e *Engine) executeRunning(ctx context.Context, state *statestore.BaseTaskS
 		line := bytes.TrimRight(rawLine, "\r\n")
 
 		var row phys.Row
-		if err := json.Unmarshal(line, &row); err != nil {
-			return 0, fmt.Errorf("import: decode row at offset %d: %w", offset, err)
+		var decErr error
+		if e.rowUnmarshaler != nil {
+			row, decErr = e.rowUnmarshaler(line)
+		} else {
+			decErr = json.Unmarshal(line, &row)
+		}
+		if decErr != nil {
+			return 0, fmt.Errorf("import: decode row at offset %d: %w", offset, decErr)
 		}
 		rows = append(rows, row)
 	}

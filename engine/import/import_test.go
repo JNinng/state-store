@@ -391,3 +391,115 @@ func TestEngine_CRLF_OffsetTracking(t *testing.T) {
 		t.Errorf("final offset = %d, want file size %d", finalOffset, info.Size())
 	}
 }
+
+// ---- RowUnmarshaler 测试 ----
+
+// person 是反序列化的目标 struct。
+type person struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Age  int    `json:"age"`
+}
+
+func TestEngine_RowUnmarshaler_Struct(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "people.jsonl")
+
+	// 写入 3 条数据
+	rows := []phys.Row{
+		{"id": 1.0, "name": "alice", "age": 30.0},
+		{"id": 2.0, "name": "bob", "age": 25.0},
+		{"id": 3.0, "name": "carol", "age": 28.0},
+	}
+	f, _ := os.Create(srcPath)
+	for _, r := range rows {
+		data, _ := json.Marshal(r)
+		f.Write(append(data, '\n'))
+	}
+	f.Close()
+
+	target := &stubDataTarget{}
+
+	// 自定义反序列化: 先反序列化到 person struct，校验后转为 phys.Row
+	eng := New(srcPath, target,
+		WithBatchSize(2),
+		WithRowUnmarshaler(func(line []byte) (phys.Row, error) {
+			var p person
+			if err := json.Unmarshal(line, &p); err != nil {
+				return nil, err
+			}
+			// 校验年龄范围
+			if p.Age < 0 || p.Age > 150 {
+				return nil, json.Unmarshal([]byte(`{}`), nil) // 触发 error
+			}
+			// 将 struct 转为 phys.Row（大写 key）
+			return phys.Row{
+				"ID":   float64(p.ID),
+				"NAME": p.Name,
+				"AGE":  float64(p.Age),
+			}, nil
+		}),
+	)
+
+	state := &statestore.BaseTaskState{
+		TaskID:   "import-struct",
+		TaskType: "import",
+		Phase:    statestore.PhasePending,
+	}
+
+	for state.Phase != statestore.PhaseCompleted {
+		_, err := eng.Execute(context.Background(), state)
+		if err != nil {
+			t.Fatalf("Execute at phase=%q: %v", state.Phase, err)
+		}
+	}
+
+	if len(target.inserted) != 3 {
+		t.Fatalf("inserted rows = %d, want 3", len(target.inserted))
+	}
+
+	// 验证自定义 key 名称生效
+	if target.inserted[0]["ID"] != 1.0 {
+		t.Errorf("first row ID = %v, want 1.0", target.inserted[0]["ID"])
+	}
+	if target.inserted[0]["NAME"] != "alice" {
+		t.Errorf("first row NAME = %v, want alice", target.inserted[0]["NAME"])
+	}
+	if target.inserted[1]["AGE"] != 25.0 {
+		t.Errorf("second row AGE = %v, want 25.0", target.inserted[1]["AGE"])
+	}
+}
+
+func TestEngine_RowUnmarshaler_Defaults(t *testing.T) {
+	// 不使用 WithRowUnmarshaler 时，默认行为不变
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "source.jsonl")
+
+	f, _ := os.Create(srcPath)
+	f.WriteString(`{"id":"1","name":"alice"}` + "\n")
+	f.Close()
+
+	target := &stubDataTarget{}
+	eng := New(srcPath, target, WithBatchSize(1))
+
+	state := &statestore.BaseTaskState{
+		TaskID:   "import-default",
+		TaskType: "import",
+		Phase:    statestore.PhasePending,
+	}
+
+	for state.Phase != statestore.PhaseCompleted {
+		_, err := eng.Execute(context.Background(), state)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+	}
+
+	if len(target.inserted) != 1 {
+		t.Fatalf("inserted = %d, want 1", len(target.inserted))
+	}
+	// 默认反序列化到 map[string]interface{}, 数字为 float64
+	if target.inserted[0]["id"] != "1" {
+		t.Errorf("id = %v (%T), want string \"1\"", target.inserted[0]["id"], target.inserted[0]["id"])
+	}
+}
