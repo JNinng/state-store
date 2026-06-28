@@ -30,6 +30,7 @@ go run ./cmd/examples/import/          # Import: JSONL → data target with chec
 go run ./cmd/examples/chunked-export/  # Chunked export: batch→shard→merge pipeline visible
 go run ./cmd/examples/csv-export/      # CSV export: custom RowMarshaler for structured text formats
 go run ./cmd/examples/outbox/          # Outbox + Saga: scheduling-layer patterns
+go run ./cmd/examples/accumulator/    # Accumulator: incremental outbox in custom engine
 ```
 
 No linting or code generation tools are configured.
