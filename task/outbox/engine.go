@@ -2,8 +2,6 @@ package outbox
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"state-store/statestore"
 	"state-store/task"
@@ -15,20 +13,24 @@ import (
 // 消息的生命周期，真正的不可逆操作（发邮件、扣款、发送消息队列）由
 // Dispatcher 在调度层执行。
 //
+// 对于需要在 Execute 过程中增量生产消息的自定义引擎，直接嵌入 Accumulator：
+//
+//	type myEngine struct {
+//	    outbox.Accumulator
+//	    // ... 其他字段
+//	}
+//
 // 使用方式：
 //
 //	eng := outbox.NewEngine("my_task", messages)
 //	task.Run(ctx, repo, eng, taskID)
 //
-//	// 调度层提取并分发
-//	for _, m := range eng.Messages() {
-//	    m.Status = outbox.StatusPending
-//	    outboxStore.Append(ctx, m)
-//	}
+//	// 调度层提取并分发（或用 RunWithOutbox 一步完成）
+//	outbox.RunWithOutbox(ctx, repo, eng, taskID, outboxStore)
 //	dispatcher.DispatchPending(ctx)
 type Engine struct {
 	taskType string
-	messages []*Message
+	acc      Accumulator
 }
 
 // NewEngine 创建通用 outbox 引擎。
@@ -36,7 +38,11 @@ type Engine struct {
 // taskType 是引擎的任务类型标识（对应 TaskType() 返回值）。
 // messages 是引擎生命周期内要纳入 checkpoint 管理的 outbox 消息。
 func NewEngine(taskType string, messages []*Message) *Engine {
-	return &Engine{taskType: taskType, messages: messages}
+	e := &Engine{taskType: taskType}
+	for _, m := range messages {
+		e.acc.Add(m)
+	}
+	return e
 }
 
 // TaskType 返回任务类型标识。
@@ -51,8 +57,7 @@ func (e *Engine) Execute(_ context.Context, state *statestore.BaseTaskState) (in
 	switch state.Phase {
 	case statestore.PhasePending:
 		state.Phase = statestore.PhaseRunning
-		outboxJSON, _ := json.Marshal(e.messages)
-		state.Payload = json.RawMessage(fmt.Sprintf(`{"outbox":%s}`, string(outboxJSON)))
+		state.Payload = e.acc.MarshalPayload()
 		return 0, nil
 	case statestore.PhaseRunning:
 		state.Phase = statestore.PhaseCompleted
@@ -80,7 +85,7 @@ func (e *Engine) Progress(state statestore.BaseTaskState) int {
 // Messages 返回引擎中的 outbox 消息，供调度层在 engine.Run 后提取并写入
 // OutboxStore 进行分发。
 func (e *Engine) Messages() []*Message {
-	return e.messages
+	return e.acc.Messages()
 }
 
 // 编译期接口检查

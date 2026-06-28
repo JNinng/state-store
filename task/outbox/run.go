@@ -61,11 +61,12 @@ func RunWithOutbox(ctx context.Context,
 	}
 
 	// 步骤 4: 从 Payload 提取 outbox 消息
-	msgs := extractMessages(state.Payload)
-	if len(msgs) == 0 {
+	var acc Accumulator
+	if err := acc.UnmarshalPayload(state.Payload); err != nil || acc.Len() == 0 {
 		// 无 outbox 消息——引擎可能不使用 outbox 模式，正常返回
 		return &state, nil
 	}
+	msgs := acc.Messages()
 
 	// 步骤 5: 写入 OutboxStore
 	for _, msg := range msgs {
@@ -89,21 +90,4 @@ func RunWithOutbox(ctx context.Context,
 	}
 
 	return &state, nil
-}
-
-// extractMessages 从 Payload 中提取 outbox 消息。
-// Payload 格式约定: {"outbox": [...]}
-func extractMessages(payload json.RawMessage) []*Message {
-	if len(payload) == 0 {
-		return nil
-	}
-
-	var wrapper struct {
-		Outbox []*Message `json:"outbox"`
-	}
-	if err := json.Unmarshal(payload, &wrapper); err != nil {
-		return nil
-	}
-
-	return wrapper.Outbox
 }
