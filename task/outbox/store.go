@@ -71,7 +71,7 @@ func (s *InMemoryStore) Append(ctx context.Context, msg *Message) error {
 	}
 
 	if _, exists := s.messages[msg.ID]; exists {
-		return fmt.Errorf("outbox: message %s already exists", msg.ID)
+		return fmt.Errorf("%w: %s", ErrDuplicateID, msg.ID)
 	}
 
 	s.messages[msg.ID] = &clone
