@@ -131,53 +131,6 @@ func dedupLines(data []byte) int {
 	return len(seen)
 }
 
-// notifyEngine 是一个在 Payload 中嵌入 outbox 消息的演示引擎。
-// 展示调度层如何使用 outbox 模式：引擎只写意图，不可逆操作由调度层分发。
-type notifyEngine struct {
-	taskID   string
-	messages []*outbox.Message
-}
-
-func newNotifyEngine(taskID string, messages []*outbox.Message) *notifyEngine {
-	return &notifyEngine{taskID: taskID, messages: messages}
-}
-
-func (e *notifyEngine) TaskType() string { return "notify_demo" }
-
-func (e *notifyEngine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
-	switch state.Phase {
-	case statestore.PhasePending:
-		state.Phase = statestore.PhaseRunning
-		outboxData, _ := json.Marshal(e.messages)
-		state.Payload = json.RawMessage(fmt.Sprintf(`{"outbox":%s}`, string(outboxData)))
-		return 0, nil
-	case statestore.PhaseRunning:
-		state.Phase = statestore.PhaseCompleted
-		state.Message = "notify task completed"
-		return 100, nil
-	default:
-		return state.CheckpointLSN, nil
-	}
-}
-
-func (e *notifyEngine) Compensate(ctx context.Context, targetLSN int64) error {
-	return nil
-}
-
-func (e *notifyEngine) Progress(state statestore.BaseTaskState) int {
-	if state.Phase == statestore.PhaseCompleted {
-		return 100
-	}
-	return 50
-}
-
-// ExtractOutboxMessages 从 Payload 中提取 outbox 消息。
-func (e *notifyEngine) ExtractOutboxMessages() ([]*outbox.Message, error) {
-	return e.messages, nil
-}
-
-var _ task.Engine = (*notifyEngine)(nil)
-
 func main() {
 	ctx := context.Background()
 
@@ -460,7 +413,7 @@ func main() {
 	// ---- 5b. 正常流程：engine.Run + outbox 分发 ----
 	fmt.Println("--- 5b. 正常流程：engine.Run 完成后分发 outbox ---")
 
-	normalNotifyEng := newNotifyEngine("export-task-normal", []*outbox.Message{
+	normalNotifyEng := outbox.NewEngine("notify_demo", []*outbox.Message{
 		{ID: "notify-001", EventType: "write_notification", Payload: json.RawMessage(`{"task_id":"export-task-normal","message":"export completed successfully"}`)},
 	})
 	normalNotifyRepo, _ := filestore.New(filepath.Join(workDir, "notify-normal-state"))
@@ -470,7 +423,7 @@ func main() {
 	}
 
 	// 从引擎 Payload 提取 outbox 消息并写入 Store
-	msgs, _ := normalNotifyEng.ExtractOutboxMessages()
+	msgs := normalNotifyEng.Messages()
 	for _, m := range msgs {
 		m.Status = outbox.StatusPending
 		outboxStore.Append(ctx, m)

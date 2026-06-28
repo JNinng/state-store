@@ -24,55 +24,11 @@ import (
 
 	"state-store/filestore"
 	"state-store/saga"
-	"state-store/statestore"
 	"state-store/task"
 	"state-store/task/outbox"
 )
 
-// ---- Outbox 模式: 通知引擎 ----
-
-// notifyEngine 在 Payload 中嵌入 outbox 消息的演示引擎。
-// Execute 只负责记录意图（写入 Payload），不执行真正的通知操作。
-type notifyEngine struct {
-	taskID   string
-	messages []*outbox.Message
-}
-
-func newNotifyEngine(taskID string, messages []*outbox.Message) *notifyEngine {
-	return &notifyEngine{taskID: taskID, messages: messages}
-}
-
-func (e *notifyEngine) TaskType() string { return "notify_demo" }
-
-func (e *notifyEngine) Execute(_ context.Context, state *statestore.BaseTaskState) (int64, error) {
-	switch state.Phase {
-	case statestore.PhasePending:
-		state.Phase = statestore.PhaseRunning
-		// 将 outbox 消息嵌入 Payload —— 引擎只写意图
-		outboxJSON, _ := json.Marshal(e.messages)
-		state.Payload = json.RawMessage(fmt.Sprintf(`{"outbox":%s}`, string(outboxJSON)))
-		return 0, nil
-	case statestore.PhaseRunning:
-		state.Phase = statestore.PhaseCompleted
-		state.Message = "notify task done"
-		return 100, nil
-	default:
-		return state.CheckpointLSN, nil
-	}
-}
-
-func (e *notifyEngine) Compensate(_ context.Context, _ int64) error {
-	return nil // 无物理副作用需要补偿
-}
-
-func (e *notifyEngine) Progress(state statestore.BaseTaskState) int {
-	if state.Phase == statestore.PhaseCompleted {
-		return 100
-	}
-	return 50
-}
-
-var _ task.Engine = (*notifyEngine)(nil)
+// ---- Outbox 模式: 使用通用 outbox 引擎 ----
 
 func main() {
 	ctx := context.Background()
@@ -120,7 +76,7 @@ func main() {
 	fmt.Println("Handler 已注册: send_notification → notifications.log")
 
 	// 2. 运行引擎 — 引擎负责可逆工作，只记录意图
-	notifyEng := newNotifyEngine("task-export-normal", []*outbox.Message{
+	notifyEng := outbox.NewEngine("notify_demo", []*outbox.Message{
 		{
 			ID:        "msg-001",
 			EventType: "send_notification",
@@ -137,11 +93,11 @@ func main() {
 
 	// 3. 提取 outbox 消息并写入 Store
 	outboxStore := outbox.NewInMemoryStore()
-	for _, m := range notifyEng.messages {
+	for _, m := range notifyEng.Messages() {
 		m.Status = outbox.StatusPending
 		outboxStore.Append(ctx, m)
 	}
-	fmt.Printf("提取到 %d 条 outbox 消息\n", len(notifyEng.messages))
+	fmt.Printf("提取到 %d 条 outbox 消息\n", len(notifyEng.Messages()))
 
 	// 4. 分发 — 执行真正的不可逆操作
 	dispatcher := outbox.NewDispatcher(outboxStore, registry)

@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"state-store/statestore"
 	"state-store/task"
 )
 
@@ -421,11 +419,9 @@ func TestSchedulingLayer_OutboxPattern(t *testing.T) {
 
 	// ---- 引擎（仅做可逆操作） ----
 	// 引擎的 Payload 中包含 outbox 意图记录
-	eng := &outboxAwareEngine{
-		outboxMessages: []*Message{
-			{ID: "email-1", EventType: "send_email", Payload: json.RawMessage(`{"to":"admin@example.com"}`)},
-		},
-	}
+	eng := NewEngine("outbox_example", []*Message{
+		{ID: "email-1", EventType: "send_email", Payload: json.RawMessage(`{"to":"admin@example.com"}`)},
+	})
 
 	repo := newMockRepo()
 
@@ -438,7 +434,7 @@ func TestSchedulingLayer_OutboxPattern(t *testing.T) {
 
 	// 步骤 2：提取 outbox 意图并写入 Store
 	// （从最终的 task state Payload 中提取，此处直接从引擎获取）
-	for _, msg := range eng.outboxMessages {
+	for _, msg := range eng.Messages() {
 		msg.Status = StatusPending
 		if err := outboxStore.Append(ctx, msg); err != nil {
 			t.Fatalf("append outbox: %v", err)
@@ -464,43 +460,6 @@ func TestSchedulingLayer_OutboxPattern(t *testing.T) {
 	}
 }
 
-// outboxAwareEngine 是一个在 Payload 中嵌入 outbox 消息的示例引擎。
-type outboxAwareEngine struct {
-	outboxMessages []*Message
-}
-
-func (e *outboxAwareEngine) TaskType() string { return "outbox_example" }
-
-func (e *outboxAwareEngine) Execute(ctx context.Context, state *statestore.BaseTaskState) (int64, error) {
-	switch state.Phase {
-	case statestore.PhasePending:
-		state.Phase = statestore.PhaseRunning
-		// 在 Payload 中写入 outbox 意图
-		outboxData, _ := json.Marshal(e.outboxMessages)
-		state.Payload = json.RawMessage(fmt.Sprintf(`{"outbox":%s}`, string(outboxData)))
-		return 0, nil
-	case statestore.PhaseRunning:
-		state.Phase = statestore.PhaseCompleted
-		state.Message = "done"
-		return 100, nil
-	default:
-		return state.CheckpointLSN, nil
-	}
-}
-
-func (e *outboxAwareEngine) Compensate(ctx context.Context, targetLSN int64) error {
-	return nil
-}
-
-func (e *outboxAwareEngine) Progress(state statestore.BaseTaskState) int {
-	return 50
-}
-
-var _ task.Engine = (*outboxAwareEngine)(nil)
-
-// ============================================================
-// 调度层完整示例：带日志的 Outbox Dispatcher
-// ============================================================
 
 func TestDispatcher_WithLogger(t *testing.T) {
 	store := NewInMemoryStore()
