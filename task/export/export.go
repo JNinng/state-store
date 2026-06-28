@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"state-store/engine"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
 )
 
 // Payload 是导出任务的业务扩展状态。
@@ -28,7 +28,7 @@ type Payload struct {
 // 可用于自定义日期格式、字段过滤、或透传预序列化的数据。
 type RowMarshaler func(row phys.Row) ([]byte, error)
 
-// Engine 实现 engine.Engine 接口，执行分页提取→分块写文件→合并的导出流程。
+// Engine 实现 task.Engine 接口，执行分页提取→分块写文件→合并的导出流程。
 type Engine struct {
 	src          phys.DataSource
 	outputDir    string
@@ -72,7 +72,7 @@ func New(src phys.DataSource, outputDir, outputFile string, opts ...Option) *Eng
 }
 
 // 编译期检查
-var _ engine.Engine = (*Engine)(nil)
+var _ task.Engine = (*Engine)(nil)
 
 func (e *Engine) TaskType() string { return "export" }
 

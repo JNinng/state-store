@@ -22,11 +22,11 @@ import (
 	"sort"
 	"strings"
 
-	"state-store/engine"
-	"state-store/engine/export"
 	"state-store/filestore"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/export"
 )
 
 // ---- 实现 phys.DataSource ----
@@ -141,7 +141,7 @@ func main() {
 	// engine.Run 内部流程:
 	//   running 阶段 — FetchPage → 行写入当前 chunk → 攒够 chunkPages 后 flush chunk_N.tmp
 	//   io.EOF → 转 merging 阶段 — 按序拼接所有 .chunk_N.tmp → orders.jsonl
-	if err := engine.Run(ctx, repo, eng, "task-chunked-001"); err != nil {
+	if err := task.Run(ctx, repo, eng, "task-chunked-001"); err != nil {
 		fmt.Fprintf(os.Stderr, "导出失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -233,7 +233,7 @@ func main() {
 		}
 		eng := export.New(crashSrc, recoveryDir, "orders.jsonl",
 			export.WithPageSize(pageSize), export.WithChunkPages(chunkPages))
-		_ = engine.Run(ctx, recoveryRepo, eng, "task-chunked-002")
+		_ = task.Run(ctx, recoveryRepo, eng, "task-chunked-002")
 	}()
 
 	// 崩溃后查看工作目录
@@ -250,7 +250,7 @@ func main() {
 	restartEng := export.New(&orderDB{pages}, recoveryDir, "orders.jsonl",
 		export.WithPageSize(pageSize), export.WithChunkPages(chunkPages))
 
-	if err := engine.Run(ctx, recoveryRepo, restartEng, "task-chunked-002"); err != nil {
+	if err := task.Run(ctx, recoveryRepo, restartEng, "task-chunked-002"); err != nil {
 		fmt.Fprintf(os.Stderr, "恢复失败: %v\n", err)
 		os.Exit(1)
 	}

@@ -24,10 +24,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"state-store/engine"
-	"state-store/engine/export"
 	"state-store/filestore"
 	"state-store/phys"
+	"state-store/task"
+	"state-store/task/export"
 )
 
 // ---- 实现 phys.DataSource ----
@@ -103,7 +103,7 @@ func main() {
 	fmt.Println("=== CSV 导出: 200 条订单 → orders.csv ===")
 	fmt.Println()
 
-	if err := engine.Run(ctx, repo, eng, "task-csv-001"); err != nil {
+	if err := task.Run(ctx, repo, eng, "task-csv-001"); err != nil {
 		fmt.Fprintf(os.Stderr, "导出失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -144,7 +144,7 @@ func main() {
 	jsonlPath := filepath.Join(workDir, "orders.jsonl")
 	jsonlEng := export.New(&orderDB{pages}, workDir, "orders.jsonl",
 		export.WithPageSize(10), export.WithChunkPages(5))
-	engine.Run(ctx, repo, jsonlEng, "task-jsonl-001")
+	task.Run(ctx, repo, jsonlEng, "task-jsonl-001")
 	jsonlEng.Cleanup()
 
 	jsonlData, _ := os.ReadFile(jsonlPath)

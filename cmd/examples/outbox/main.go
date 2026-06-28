@@ -2,7 +2,7 @@
 //
 // 运行: go run ./cmd/examples/outbox/
 //
-// engine.Engine.Execute 有严格的副作用约束 —— 不可逆操作（发邮件、扣款、
+// task.Engine.Execute 有严格的副作用约束 —— 不可逆操作（发邮件、扣款、
 // 发消息队列）不能在 Execute 中直接执行。outbox 包提供了调度层的解决方案。
 //
 // 本示例涵盖两个模式:
@@ -22,10 +22,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"state-store/engine"
 	"state-store/filestore"
-	"state-store/outbox"
+	"state-store/saga"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/outbox"
 )
 
 // ---- Outbox 模式: 通知引擎 ----
@@ -71,7 +72,7 @@ func (e *notifyEngine) Progress(state statestore.BaseTaskState) int {
 	return 50
 }
 
-var _ engine.Engine = (*notifyEngine)(nil)
+var _ task.Engine = (*notifyEngine)(nil)
 
 func main() {
 	ctx := context.Background()
@@ -128,7 +129,7 @@ func main() {
 	})
 
 	notifyRepo, _ := filestore.New(filepath.Join(workDir, "notify-state"))
-	if err := engine.Run(ctx, notifyRepo, notifyEng, "task-export-normal"); err != nil {
+	if err := task.Run(ctx, notifyRepo, notifyEng, "task-export-normal"); err != nil {
 		fmt.Fprintf(os.Stderr, "引擎执行失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -181,10 +182,10 @@ func main() {
 	// 场景 A: 正常流程
 	fmt.Println("--- 正常流程: 三步全部成功 ---")
 
-	createProjectSaga := &outbox.Saga{
+	createProjectSaga := &saga.Saga{
 		Name:              "create_project",
 		DefaultMaxRetries: 1,
-		Steps: []outbox.SagaStep{
+		Steps: []saga.SagaStep{
 			{
 				Name: "create_directory",
 				Action: func(_ context.Context, actx map[string]interface{}) error {
@@ -223,8 +224,8 @@ func main() {
 		},
 	}
 
-	sagaStore := outbox.NewInMemorySagaStore()
-	coordinator := outbox.NewSagaCoordinator(sagaStore)
+	sagaStore := saga.NewInMemorySagaStore()
+	coordinator := saga.NewSagaCoordinator(sagaStore)
 
 	state, err := coordinator.Run(ctx, createProjectSaga, "saga-001")
 	if err != nil {
@@ -237,10 +238,10 @@ func main() {
 	// 场景 B: 失败补偿
 	fmt.Println("--- 失败补偿: 第 2 步失败 → 回退第 1 步 ---")
 
-	failingSaga := &outbox.Saga{
+	failingSaga := &saga.Saga{
 		Name:              "failing_project",
 		DefaultMaxRetries: 1,
-		Steps: []outbox.SagaStep{
+		Steps: []saga.SagaStep{
 			{
 				Name: "create_directory",
 				Action: func(_ context.Context, _ map[string]interface{}) error {
@@ -295,8 +296,8 @@ func main() {
 	// 场景 C: 崩溃恢复
 	fmt.Println("--- 崩溃恢复: SagaStore 持久化 + Resume ---")
 
-	resumeSagaStore := outbox.NewInMemorySagaStore()
-	resumeCoordinator := outbox.NewSagaCoordinator(resumeSagaStore)
+	resumeSagaStore := saga.NewInMemorySagaStore()
+	resumeCoordinator := saga.NewSagaCoordinator(resumeSagaStore)
 
 	// 先完整执行一次 Saga
 	resumeState, _ := resumeCoordinator.Run(ctx, createProjectSaga, "saga-resume-001")

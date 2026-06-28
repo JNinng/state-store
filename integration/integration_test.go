@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"state-store/engine"
-	"state-store/engine/export"
-	importpkg "state-store/engine/import"
 	"state-store/filestore"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/export"
+	"state-store/task/ingest"
 )
 
 // inmemSource is DataSource in-memory for integration testing.
@@ -64,7 +64,7 @@ func TestExportThenImport_EndToEnd(t *testing.T) {
 	exportEng := export.New(exportSrc, dir, "exported.dat",
 		export.WithPageSize(3), export.WithChunkPages(1))
 
-	err = engine.Run(context.Background(), exportRepo, exportEng, "export-task-1")
+	err = task.Run(context.Background(), exportRepo, exportEng, "export-task-1")
 	if err != nil {
 		t.Fatalf("export Run: %v", err)
 	}
@@ -97,9 +97,9 @@ func TestExportThenImport_EndToEnd(t *testing.T) {
 	}
 
 	importTarget := &inmemTarget{}
-	importEng := importpkg.New(finalPath, importTarget, importpkg.WithBatchSize(2))
+	importEng := ingest.New(finalPath, importTarget, ingest.WithBatchSize(2))
 
-	err = engine.Run(context.Background(), importRepo, importEng, "import-task-1")
+	err = task.Run(context.Background(), importRepo, importEng, "import-task-1")
 	if err != nil {
 		t.Fatalf("import Run: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestExportRecovery_CrashDuringRunning(t *testing.T) {
 	eng2 := export.New(src2, dir, "result.dat",
 		export.WithPageSize(2), export.WithChunkPages(3))
 
-	err = engine.Run(context.Background(), repo, eng2, "recovery-test")
+	err = task.Run(context.Background(), repo, eng2, "recovery-test")
 	if err != nil {
 		t.Fatalf("Run recovery: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestExportRecovery_CrashDuringMerging(t *testing.T) {
 	eng2 := export.New(src2, dir, "result.dat",
 		export.WithPageSize(2), export.WithChunkPages(1))
 
-	err = engine.Run(context.Background(), repo, eng2, "merge-recovery")
+	err = task.Run(context.Background(), repo, eng2, "merge-recovery")
 	if err != nil {
 		t.Fatalf("Run recovery: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestImportRecovery_CrashDuringRunning(t *testing.T) {
 
 	// === Phase 1: 导入一部分后模拟崩溃 ===
 	target1 := &inmemTarget{}
-	eng1 := importpkg.New(srcPath, target1, importpkg.WithBatchSize(2))
+	eng1 := ingest.New(srcPath, target1, ingest.WithBatchSize(2))
 
 	state := &statestore.BaseTaskState{
 		TaskID:   "import-recovery",
@@ -350,9 +350,9 @@ func TestImportRecovery_CrashDuringRunning(t *testing.T) {
 
 	// === Phase 2: 用新 target 和 engine 恢复 ===
 	target2 := &inmemTarget{}
-	eng2 := importpkg.New(srcPath, target2, importpkg.WithBatchSize(2))
+	eng2 := ingest.New(srcPath, target2, ingest.WithBatchSize(2))
 
-	err = engine.Run(context.Background(), repo, eng2, "import-recovery")
+	err = task.Run(context.Background(), repo, eng2, "import-recovery")
 	if err != nil {
 		t.Fatalf("Run recovery: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestExportResume_MidCrash(t *testing.T) {
 	exportEng := export.New(exportSrc, dir, "result.dat",
 		export.WithPageSize(2), export.WithChunkPages(3))
 
-	err = engine.Run(context.Background(), repo, exportEng, "resume-test")
+	err = task.Run(context.Background(), repo, exportEng, "resume-test")
 	if err != nil {
 		t.Fatalf("export Run: %v", err)
 	}

@@ -1,4 +1,4 @@
-package importpkg
+package ingest
 
 import (
 	"context"
@@ -430,7 +430,7 @@ func TestEngine_RowUnmarshaler_Struct(t *testing.T) {
 			}
 			// 校验年龄范围
 			if p.Age < 0 || p.Age > 150 {
-				return nil, json.Unmarshal([]byte(`{}`), nil) // 触发 error
+				return nil, json.Unmarshal([]byte(`{invalid`), &p) // 触发 error
 			}
 			// 将 struct 转为 phys.Row（大写 key）
 			return phys.Row{

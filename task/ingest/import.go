@@ -1,4 +1,4 @@
-package importpkg
+package ingest
 
 import (
 	"bufio"
@@ -9,9 +9,9 @@ import (
 	"io"
 	"os"
 
-	"state-store/engine"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
 )
 
 // Payload 是导入任务的业务扩展状态。
@@ -28,7 +28,7 @@ type Payload struct {
 //
 // 示例 — 反序列化到 struct:
 //
-//	importpkg.WithRowUnmarshaler(func(line []byte) (phys.Row, error) {
+//	ingest.WithRowUnmarshaler(func(line []byte) (phys.Row, error) {
 //	    var v myStruct
 //	    if err := json.Unmarshal(line, &v); err != nil {
 //	        return nil, err
@@ -38,7 +38,7 @@ type Payload struct {
 //	})
 type RowUnmarshaler func(line []byte) (phys.Row, error)
 
-// Engine 实现 engine.Engine 接口，从源文件读取并批量写入目标。
+// Engine 实现 task.Engine 接口，从源文件读取并批量写入目标。
 type Engine struct {
 	srcPath        string
 	target         phys.DataTarget
@@ -73,7 +73,7 @@ func New(srcPath string, target phys.DataTarget, opts ...Option) *Engine {
 }
 
 // 编译期检查
-var _ engine.Engine = (*Engine)(nil)
+var _ task.Engine = (*Engine)(nil)
 
 func (e *Engine) TaskType() string { return "import" }
 

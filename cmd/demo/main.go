@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"state-store/engine"
-	"state-store/engine/export"
-	importpkg "state-store/engine/import"
 	"state-store/filestore"
-	"state-store/outbox"
 	"state-store/phys"
+	"state-store/saga"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/export"
+	"state-store/task/ingest"
+	"state-store/task/outbox"
 )
 
 // ============================================================
@@ -77,7 +78,7 @@ func printImportState(repo *filestore.FileRepository, taskID string) {
 	}
 	var state statestore.BaseTaskState
 	json.Unmarshal(raw, &state)
-	var p importpkg.Payload
+	var p ingest.Payload
 	json.Unmarshal(state.Payload, &p)
 	fmt.Printf("  状态: phase=%s, progress=%d%%, lsn=%d\n",
 		state.Phase, state.Progress, state.CheckpointLSN)
@@ -175,7 +176,7 @@ func (e *notifyEngine) ExtractOutboxMessages() ([]*outbox.Message, error) {
 	return e.messages, nil
 }
 
-var _ engine.Engine = (*notifyEngine)(nil)
+var _ task.Engine = (*notifyEngine)(nil)
 
 func main() {
 	ctx := context.Background()
@@ -223,7 +224,7 @@ func main() {
 		export.WithChunkPages(2), // 每 2 页一个 chunk → 共 3 个 chunks
 	)
 
-	if err := engine.Run(ctx, exportRepo, exportEng, "export-001"); err != nil {
+	if err := task.Run(ctx, exportRepo, exportEng, "export-001"); err != nil {
 		panic(err)
 	}
 	exportEng.Cleanup()
@@ -291,7 +292,7 @@ func main() {
 		export.WithPageSize(5), export.WithChunkPages(2),
 	)
 
-	if err := engine.Run(ctx, recoveryExportRepo, restartedExportEng, "export-recovery-001"); err != nil {
+	if err := task.Run(ctx, recoveryExportRepo, restartedExportEng, "export-recovery-001"); err != nil {
 		panic(err)
 	}
 	restartedExportEng.Cleanup()
@@ -323,11 +324,11 @@ func main() {
 
 	importRepo, _ := filestore.New(filepath.Join(workDir, "import-state"))
 	importTarget := &memTarget{}
-	importEng := importpkg.New(exportedPath, importTarget,
-		importpkg.WithBatchSize(7), // 每批 7 行（30 行 ≈ 5 批）
+	importEng := ingest.New(exportedPath, importTarget,
+		ingest.WithBatchSize(7), // 每批 7 行（30 行 ≈ 5 批）
 	)
 
-	if err := engine.Run(ctx, importRepo, importEng, "import-001"); err != nil {
+	if err := task.Run(ctx, importRepo, importEng, "import-001"); err != nil {
 		panic(err)
 	}
 
@@ -348,8 +349,8 @@ func main() {
 	// 4a. 创建独立的 repo 和 engine
 	recoveryImportRepo, _ := filestore.New(filepath.Join(workDir, "import-recovery-state"))
 	recoveryImportTarget1 := &memTarget{}
-	recoveryImportEng1 := importpkg.New(exportedPath, recoveryImportTarget1,
-		importpkg.WithBatchSize(7),
+	recoveryImportEng1 := ingest.New(exportedPath, recoveryImportTarget1,
+		ingest.WithBatchSize(7),
 	)
 
 	// 4b. 手动执行 2 批（14 行），然后模拟崩溃
@@ -387,11 +388,11 @@ func main() {
 	//     引擎从 offset 重新读取。
 	fmt.Println("--- 重启：新 engine + engine.Run 自动恢复 ---")
 	recoveryImportTarget2 := &memTarget{} // 新 target（模拟新进程）
-	recoveryImportEng2 := importpkg.New(exportedPath, recoveryImportTarget2,
-		importpkg.WithBatchSize(7),
+	recoveryImportEng2 := ingest.New(exportedPath, recoveryImportTarget2,
+		ingest.WithBatchSize(7),
 	)
 
-	if err := engine.Run(ctx, recoveryImportRepo, recoveryImportEng2, "import-recovery-001"); err != nil {
+	if err := task.Run(ctx, recoveryImportRepo, recoveryImportEng2, "import-recovery-001"); err != nil {
 		panic(err)
 	}
 
@@ -464,7 +465,7 @@ func main() {
 	})
 	normalNotifyRepo, _ := filestore.New(filepath.Join(workDir, "notify-normal-state"))
 
-	if err := engine.Run(ctx, normalNotifyRepo, normalNotifyEng, "export-task-normal"); err != nil {
+	if err := task.Run(ctx, normalNotifyRepo, normalNotifyEng, "export-task-normal"); err != nil {
 		panic(err)
 	}
 
@@ -632,10 +633,10 @@ func main() {
 	configPath := filepath.Join(sagaDir, "config.json")
 	indexPath := filepath.Join(sagaDir, "index.json")
 
-	createSaga := &outbox.Saga{
+	createSaga := &saga.Saga{
 		Name:              "create_project",
 		DefaultMaxRetries: 1,
-		Steps: []outbox.SagaStep{
+		Steps: []saga.SagaStep{
 			{
 				Name: "create_directory",
 				Action: func(sctx context.Context, actx map[string]interface{}) error {
@@ -682,8 +683,8 @@ func main() {
 		},
 	}
 
-	sagaStore := outbox.NewInMemorySagaStore()
-	coordinator := outbox.NewSagaCoordinator(sagaStore)
+	sagaStore := saga.NewInMemorySagaStore()
+	coordinator := saga.NewSagaCoordinator(sagaStore)
 	sagaState, err := coordinator.Run(ctx, createSaga, "saga-normal-001")
 	if err != nil {
 		panic(err)
@@ -703,10 +704,10 @@ func main() {
 
 	os.RemoveAll(sagaDir)
 
-	failingSaga := &outbox.Saga{
+	failingSaga := &saga.Saga{
 		Name:              "failing_project",
 		DefaultMaxRetries: 1,
-		Steps: []outbox.SagaStep{
+		Steps: []saga.SagaStep{
 			{
 				Name: "create_directory",
 				Action: func(sctx context.Context, actx map[string]interface{}) error {
@@ -771,10 +772,10 @@ func main() {
 
 	os.RemoveAll(sagaDir)
 
-	resumeSaga := &outbox.Saga{
+	resumeSaga := &saga.Saga{
 		Name:              "resume_project",
 		DefaultMaxRetries: 1,
-		Steps: []outbox.SagaStep{
+		Steps: []saga.SagaStep{
 			{
 				Name: "create_directory",
 				Action: func(sctx context.Context, actx map[string]interface{}) error {
@@ -810,12 +811,12 @@ func main() {
 		},
 	}
 
-	resumeSagaStore := outbox.NewInMemorySagaStore()
-	resumeCoordinator := outbox.NewSagaCoordinator(resumeSagaStore)
+	resumeSagaStore := saga.NewInMemorySagaStore()
+	resumeCoordinator := saga.NewSagaCoordinator(resumeSagaStore)
 
 	resumeSagaState, _ := resumeCoordinator.Run(ctx, resumeSaga, "saga-resume-001")
 	fmt.Printf("  Saga 结果: %s\n", resumeSagaState.Status)
-	if resumeSagaState.Status == outbox.SagaCompleted {
+	if resumeSagaState.Status == saga.SagaCompleted {
 		fmt.Println("  ✓ 所有步骤已完成（SagaStore 可在崩溃后恢复）")
 	}
 	fmt.Println()

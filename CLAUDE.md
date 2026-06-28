@@ -12,11 +12,11 @@ go build ./...
 go test ./...
 
 # Run tests for a single package
-go test ./engine/export/
+go test ./task/export/
 go test ./outbox/
 
 # Run a single test by name
-go test -run TestEngine_NormalFlow ./engine/export/
+go test -run TestEngine_NormalFlow ./task/export/
 
 # Run tests with verbose output
 go test -v ./...
@@ -43,8 +43,8 @@ This is a **Go library (module: `state-store`, Go 1.26)** for orchestrating asyn
 
 **`engine/` — Orchestration Framework**
 
-- `engine.Engine` interface defines lifecycle hooks: `TaskType()`, `Execute()`, `Compensate()`, `Progress()`.
-- `engine.Run()` is the core loop: **Load state → Compensate if recovering → Execute→Save loop** until terminal phase.
+- `task.Engine` interface defines lifecycle hooks: `TaskType()`, `Execute()`, `Compensate()`, `Progress()`.
+- `task.Run()` is the core loop: **Load state → Compensate if recovering → Execute→Save loop** until terminal phase.
   The framework owns the checkpoint protocol; engines own business logic.
 - Every `Execute()` call returns a new LSN (Log Sequence Number) that the framework persists atomically via
   `StateRepository`.
@@ -57,14 +57,14 @@ This is a **Go library (module: `state-store`, Go 1.26)** for orchestrating asyn
   goes directly from `running` to `completed`.
 - `StateRepository` interface: `Load` (nil,nil for missing), `Save` (atomic full replacement), `Delete` (idempotent).
 
-**`engine/export/` — Export Engine**
+**`task/export/` — Export Engine**
 
 - Paginates from a `phys.DataSource`, writing rows to numbered chunk files. When `io.EOF` is returned, transitions to
   `merging` phase and concatenates chunks into a single output file.
 - Chunk files (`.chunk_N.tmp`) are intermediate artifacts; call `Cleanup()` after `Run()` succeeds to remove them.
 - `Compensate` truncates the final file to the checkpoint LSN on recovery.
 
-**`engine/import/` — Import Engine**
+**`task/ingest/` — Import Engine**
 
 - Reads a JSONL file line-by-line using `bufio.Scanner` (not `json.Decoder`, to avoid internal buffering issues),
   tracking precise byte offsets.
@@ -87,12 +87,12 @@ This is a **Go library (module: `state-store`, Go 1.26)** for orchestrating asyn
 
 **`outbox/` — Scheduling-Layer Outbox & Saga Patterns**
 
-Purpose: engine.Engine.Execute has a strict side-effect constraint — physical side effects must be compensatable (
+Purpose: task.Engine.Execute has a strict side-effect constraint — physical side effects must be compensatable (
 truncatable files, idempotent DB UPSERT). Irreversible operations (sending emails, deducting money, message queue sends)
 must NOT be performed directly in Execute. The `outbox/` package provides two patterns for the **scheduling layer** (the
-code that calls `engine.Run()`) to handle these safely:
+code that calls `task.Run()`) to handle these safely:
 
-- **Outbox pattern**: Engines write "intent records" in their Payload. After `engine.Run()` succeeds, the scheduling
+- **Outbox pattern**: Engines write "intent records" in their Payload. After `task.Run()` succeeds, the scheduling
   layer extracts records into an `OutboxStore`, and a `Dispatcher` executes the actual irreversible operations with
   at-least-once delivery semantics.
 - **Saga pattern**: Multi-step distributed transactions where each step has a compensating action. The `SagaCoordinator`
@@ -115,7 +115,7 @@ Usage pattern (scheduling layer):
 
 ```go
 // 1. Run the engine (reversible work with checkpoint protection)
-err := engine.Run(ctx, repo, eng, taskID)
+err := task.Run(ctx, repo, eng, taskID)
 
 // 2. Extract outbox intents from final task state and persist
 for _, msg := range extractOutboxMessages(finalState) {
@@ -134,7 +134,8 @@ if state.Status == outbox.SagaFailed {
 }
 ```
 
-Testing: `outbox/outbox_test.go` includes integration examples showing how the scheduling layer composes `engine.Run()`
+Testing: `task/outbox/outbox_test.go` includes integration examples showing how the scheduling layer composes
+`task.Run()`
 with outbox dispatch and saga orchestration.
 
 ### Key Design Decisions
@@ -144,7 +145,7 @@ with outbox dispatch and saga orchestration.
   The framework treats it as opaque.
 - **Compensate is called before Execute on recovery** — allows engines to align physical systems (files, DBs) to the
   checkpoint before resuming work.
-- **Interface satisfaction verified at compile time** (e.g., `var _ engine.Engine = (*Engine)(nil)`).
+- **Interface satisfaction verified at compile time** (e.g., `var _ task.Engine = (*Engine)(nil)`).
 
 ### Testing Patterns
 

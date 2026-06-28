@@ -28,11 +28,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"state-store/engine"
-	importpkg "state-store/engine/import"
 	"state-store/filestore"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/ingest"
 )
 
 // ---- 实现 phys.DataTarget（你的数据层） ----
@@ -100,7 +100,7 @@ func printImportState(repo *filestore.FileRepository, taskID string) {
 	}
 	var state statestore.BaseTaskState
 	json.Unmarshal(raw, &state)
-	var p importpkg.Payload
+	var p ingest.Payload
 	json.Unmarshal(state.Payload, &p)
 	fmt.Printf("  checkpoint: phase=%s  progress=%d%%  offset=%d  batch=%d  inserted=%d\n",
 		state.Phase, state.Progress, p.CurrentReadOffset, p.CurrentBatchIdx, p.InsertedRows)
@@ -128,13 +128,13 @@ func main() {
 	repo, _ := filestore.New(filepath.Join(workDir, "state"))
 
 	target := &userDB{users: make(map[float64]phys.Row)}
-	eng := importpkg.New(
-		srcPath,                     // JSONL 源文件路径
-		target,                      // 你的数据目标
-		importpkg.WithBatchSize(20), // 每批写入 20 行
+	eng := ingest.New(
+		srcPath,                  // JSONL 源文件路径
+		target,                   // 你的数据目标
+		ingest.WithBatchSize(20), // 每批写入 20 行
 	)
 
-	if err := engine.Run(ctx, repo, eng, "task-import-001"); err != nil {
+	if err := task.Run(ctx, repo, eng, "task-import-001"); err != nil {
 		fmt.Fprintf(os.Stderr, "导入失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -175,21 +175,21 @@ func main() {
 			inner:      &userDB{users: make(map[float64]phys.Row)},
 			crashBatch: 4, // 第 4 次批量写入时崩溃
 		}
-		eng := importpkg.New(srcPath, crashTarget, importpkg.WithBatchSize(20))
+		eng := ingest.New(srcPath, crashTarget, ingest.WithBatchSize(20))
 
 		// engine.Run 在每批写入后自动 Save checkpoint。
 		// 崩溃时前 3 批的 offset 已被持久化。
-		_ = engine.Run(ctx, recoveryRepo, eng, "task-import-002")
+		_ = task.Run(ctx, recoveryRepo, eng, "task-import-002")
 	}()
 
 	// 第二次运行: recover 后"重启"，创建全新的 engine + DataTarget
 	fmt.Println("进程重启，创建新 engine 和新 DataTarget...")
 
 	target2 := &userDB{users: make(map[float64]phys.Row)}
-	eng2 := importpkg.New(srcPath, target2, importpkg.WithBatchSize(20))
+	eng2 := ingest.New(srcPath, target2, ingest.WithBatchSize(20))
 
 	// engine.Run 自动 Load checkpoint → Compensate 验证源文件 → 从断点继续
-	if err := engine.Run(ctx, recoveryRepo, eng2, "task-import-002"); err != nil {
+	if err := task.Run(ctx, recoveryRepo, eng2, "task-import-002"); err != nil {
 		fmt.Fprintf(os.Stderr, "恢复失败: %v\n", err)
 		os.Exit(1)
 	}

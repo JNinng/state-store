@@ -26,11 +26,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"state-store/engine"
-	"state-store/engine/export"
 	"state-store/filestore"
 	"state-store/phys"
 	"state-store/statestore"
+	"state-store/task"
+	"state-store/task/export"
 )
 
 // ---- 实现 phys.DataSource（你的数据层） ----
@@ -132,7 +132,7 @@ func main() {
 
 	// engine.Run 是核心循环:
 	//   Load state → Compensate(if recovering) → Execute → Save → 循环
-	if err := engine.Run(ctx, repo, eng, "task-export-001"); err != nil {
+	if err := task.Run(ctx, repo, eng, "task-export-001"); err != nil {
 		fmt.Fprintf(os.Stderr, "导出失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -184,7 +184,7 @@ func main() {
 
 		// engine.Run 内部在每步 Execute 后自动 Save checkpoint。
 		// 崩溃时前 7 页的状态已被持久化。
-		_ = engine.Run(ctx, recoveryRepo, eng, "task-export-002")
+		_ = task.Run(ctx, recoveryRepo, eng, "task-export-002")
 	}()
 
 	// 第二次运行: recover 后"重启"，创建全新的 engine 实例
@@ -194,7 +194,7 @@ func main() {
 		export.WithPageSize(10), export.WithChunkPages(4))
 
 	// engine.Run 自动 Load checkpoint → Compensate 截断文件 → 从断点继续 Execute
-	if err := engine.Run(ctx, recoveryRepo, restartEng, "task-export-002"); err != nil {
+	if err := task.Run(ctx, recoveryRepo, restartEng, "task-export-002"); err != nil {
 		fmt.Fprintf(os.Stderr, "恢复失败: %v\n", err)
 		os.Exit(1)
 	}

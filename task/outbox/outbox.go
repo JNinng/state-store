@@ -1,6 +1,6 @@
 // Package outbox 在调度层提供 Outbox 和 Saga 模式支持。
 //
-// 背景：engine.Engine.Execute 的副作用约束要求 Execute 的物理副作用必须可补偿——
+// 背景：task.Engine.Execute 的副作用约束要求 Execute 的物理副作用必须可补偿——
 // 可截断（文件）或可幂等重放（数据库 UPSERT）。发邮件、扣款、发送消息队列等
 // 不可逆操作不应直接在 Execute 中执行。
 //
