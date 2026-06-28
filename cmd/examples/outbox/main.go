@@ -24,8 +24,8 @@ import (
 
 	"state-store/filestore"
 	"state-store/saga"
-	"state-store/task"
 	"state-store/task/outbox"
+	outboxfilestore "state-store/task/outbox/filestore"
 )
 
 // ---- Outbox 模式: 使用通用 outbox 引擎 ----
@@ -43,10 +43,18 @@ func main() {
 	// 典型场景: 导出完成后需要发送邮件通知、调用 webhook、
 	// 写入消息队列等。这些操作一旦执行就无法撤回。
 	//
-	// 模式:
+	// 生产级模式（使用 RunWithOutbox + FileStore）:
 	//   1. 引擎在 Payload 中记录 "我想发一封邮件"
-	//   2. engine.Run 成功后，调度层提取并持久化到 OutboxStore
+	//   2. RunWithOutbox: 运行引擎 + 从 checkpoint 提取 outbox 消息
+	//      + 写入持久化 FileStore（崩溃安全——消息文件已落盘）
 	//   3. Dispatcher 执行真正的发邮件操作
+	//
+	// RunWithOutbox 的崩溃安全性:
+	//   如果进程在 task.Run 完成后崩溃，重启后重新调用
+	//   RunWithOutbox 不会丢失消息——它会从 StateRepository
+	//   重新加载 checkpointed Payload，再次提取 outbox 消息。
+	//   FileStore.Append 对重复 msg.ID 返回 ErrDuplicateID
+	//   （被 RunWithOutbox 自动跳过）。
 	//
 	// 保证: at-least-once 投递（消息不会丢，但可能重复）
 	//       因此 Handler 必须实现幂等
@@ -56,10 +64,9 @@ func main() {
 
 	notifyLogPath := filepath.Join(workDir, "notifications.log")
 
-	// 1. 注册 Handler — 处理具体的通知操作
+	// 1. 注册 Handler — 处理具体的通知操作（必须幂等）
 	registry := outbox.NewHandlerRegistry()
 	registry.Register("send_notification", func(msg *outbox.Message) error {
-		// 模拟发送通知: 写入文件（实际项目替换为邮件/短信/webhook）
 		f, err := os.OpenFile(notifyLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return err
@@ -75,7 +82,7 @@ func main() {
 	})
 	fmt.Println("Handler 已注册: send_notification → notifications.log")
 
-	// 2. 运行引擎 — 引擎负责可逆工作，只记录意图
+	// 2. 创建引擎 — 引擎只负责可逆工作，记录 outbox 意图到 Payload
 	notifyEng := outbox.NewEngine("notify_demo", []*outbox.Message{
 		{
 			ID:        "msg-001",
@@ -84,22 +91,31 @@ func main() {
 		},
 	})
 
+	// 3. RunWithOutbox: 运行引擎 + 从 checkpoint 提取消息 + 写入 FileStore
+	//
+	// 这一步替代了之前手动的:
+	//   task.Run → eng.Messages() → outboxStore.Append
+	//
+	// FileStore 将每条消息持久化为独立文件:
+	//   <dir>/msg-001.msg.json
 	notifyRepo, _ := filestore.New(filepath.Join(workDir, "notify-state"))
-	if err := task.Run(ctx, notifyRepo, notifyEng, "task-export-normal"); err != nil {
-		fmt.Fprintf(os.Stderr, "引擎执行失败: %v\n", err)
+	outboxDir := filepath.Join(workDir, "outbox-store")
+	outboxStore, _ := outboxfilestore.New(outboxDir)
+
+	finalState, err := outbox.RunWithOutbox(ctx, notifyRepo, notifyEng, "task-export-normal", outboxStore)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "RunWithOutbox 失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("引擎执行完成（意图已记录在 Payload 中）")
+	fmt.Printf("RunWithOutbox 完成: phase=%s, 消息已持久化到 FileStore\n", finalState.Phase)
 
-	// 3. 提取 outbox 消息并写入 Store
-	outboxStore := outbox.NewInMemoryStore()
-	for _, m := range notifyEng.Messages() {
-		m.Status = outbox.StatusPending
-		outboxStore.Append(ctx, m)
+	// 展示 FileStore 的文件持久化
+	entries, _ := os.ReadDir(outboxDir)
+	for _, e := range entries {
+		fmt.Printf("  outbox 文件: %s\n", e.Name())
 	}
-	fmt.Printf("提取到 %d 条 outbox 消息\n", len(notifyEng.Messages()))
 
-	// 4. 分发 — 执行真正的不可逆操作
+	// 4. 分发 — Dispatcher 从 FileStore 拉取并执行不可逆操作
 	dispatcher := outbox.NewDispatcher(outboxStore, registry)
 	processed, _ := dispatcher.DispatchPending(ctx)
 	fmt.Printf("Dispatcher 已分发 %d 条消息\n", processed)
@@ -107,11 +123,13 @@ func main() {
 	data, _ := os.ReadFile(notifyLogPath)
 	fmt.Printf("\nnotifications.log 内容:\n%s", string(data))
 
-	// at-least-once 说明
+	// 崩溃恢复说明
 	fmt.Println("---")
 	fmt.Println("Outbox 关键要点:")
 	fmt.Println("  引擎 Execute 只写意图，不执行不可逆操作")
-	fmt.Println("  engine.Run 成功后调度层提取并分发 Outbox 消息")
+	fmt.Println("  RunWithOutbox: Run + 持久化提取 + Store 写入（一步完成）")
+	fmt.Println("  FileStore: 每条消息一个 .msg.json 文件，原子写入（tmp→Sync→Rename）")
+	fmt.Println("  崩溃恢复: 从 StateRepository 重载 Payload → 重复 Append 自动跳过")
 	fmt.Println("  Handler 崩溃重试 → at-least-once → Handler 必须幂等")
 	fmt.Println("  幂等方式: 按 msg.ID 去重 / UPSERT / 唯一约束")
 	fmt.Println()
